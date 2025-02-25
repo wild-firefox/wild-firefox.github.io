@@ -35,6 +35,7 @@ layout: home  # 使用 GitHub Pages 默认主题
 - **专业**: 电子信息
 - **学历**: 研究生（2024年9月 - 现在）
 - **主修课程**: 深度强化学习，无人驾驶技术
+
 ---
 
 ## 🔍 研究方向  
@@ -47,8 +48,9 @@ layout: home  # 使用 GitHub Pages 默认主题
 
 ## 💡 技术能力  
 - **编程语言**: Python（主力）、C/C++（嵌入式开发）  
-- **框架工具**: PyTorch、OpenCV、ROS 、Linux
-- **硬件经验**: TI 芯片、Jetson Nano、传感器调试
+- **框架工具**: PyTorch、OpenCV、ROS、Linux
+- **硬件经验**: TI 芯片、Jetson Nano、传感器调试 
+
 ---
 
 ## 🏆 竞赛经历  
