@@ -6,9 +6,9 @@ layout: home  # 使用 GitHub Pages 默认主题
 ![顾家成](/images/白色标准1寸.jpg)  
 **个人博客**：[https://blog.csdn.net/weixin_56760882](https://blog.csdn.net/weixin_56760882)  
 **个人仓库**：[https://github.com/wild-firefox](https://github.com/wild-firefox)  
-<!--
-[查看项目详情](/projects) | [联系我](#contact)
--->
+
+[查看项目详情](/projects) 
+
 
 ---
 
