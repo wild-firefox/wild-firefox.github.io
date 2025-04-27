@@ -32,6 +32,5 @@ title: 项目详情
         - <video controls width="600">
             <source src="videos\flappybird_test.mp4" type="video/mp4">
             Your browser does not support the video tag.
-         <!-- </video>
-         </div> -->
+         <!-- </video> </div> -->
         - 注：智能体控制键鼠
