@@ -28,9 +28,8 @@ title: 项目详情
     - 代码：[`play_FlappyBird`](https://github.com/wild-firefox/FreeRL_for_play/tree/main/play_FlappyBird)
     - 具体实现：[`【游戏ai】从强化学习开始自学游戏ai-1非侵入式玩像素小鸟的第二部分`](https://blog.csdn.net/weixin_56760882/article/details/145848700)
     - 测试结果：
-          <!-- <div style="text-align: center;"> -->
         - <video controls width="600">
             <source src="videos\flappybird_test.mp4" type="video/mp4">
             Your browser does not support the video tag.
-         <!-- </video> </div> -->
+          </video>
         - 注：智能体控制键鼠
