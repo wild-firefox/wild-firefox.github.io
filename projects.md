@@ -17,7 +17,7 @@ title: 项目详情
 - [2024/4/26：基于IPPO算法的Pettingzoo_Pong_v3自博弈环境实现]
     - 环境：[`Pettingzoo_Pong_v3`](https://pettingzoo.farama.org/environments/atari/pong/) 
     - 代码：[`IPPO_for_pong`](https://github.com/wild-firefox/FreeRL_for_play/tree/main/IPPO_for_pong)   
-    - 具体实现：
+    - 具体实现：[`【游戏ai】从强化学习开始自学游戏ai-2 使用IPPO自博弈对抗pongv3环境`](https://blog.csdn.net/weixin_56760882/article/details/147537066)
     - 测试结果：
         - ![Pong_v0](videos\pong_animation_20250426_145439.gif)
         - 注：左右两边均为智能体ai
