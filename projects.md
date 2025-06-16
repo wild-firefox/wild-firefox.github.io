@@ -33,3 +33,10 @@ title: 项目详情
             Your browser does not support the video tag.
           </video>
         - 注：智能体控制键鼠
+
+- [2025/6/7：竞彩足球决策系统(PPO)]  
+    - 环境：自建赔率数据集
+    - 代码：[`RL_for_football_lottery`](https://github.com/wild-firefox/FreeRL_for_play/tree/main/RL_for_football_lottery)
+    - 具体实现：[`RL_for_football_lottery的readme.md`](https://github.com/wild-firefox/FreeRL_for_play/blob/main/RL_for_football_lottery/readme.md)
+    - 测试结果：
+        - ![Pong_v0](images\RL_for_football_lottery.png)
