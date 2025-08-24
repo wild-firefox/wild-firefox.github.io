@@ -10,7 +10,7 @@ title: 项目详情
     - 代码：[`first_game_pong`](https://github.com/wild-firefox/FreeRL_for_play/tree/main/first_game_pong)
     - 具体实现：[`【游戏ai】从强化学习开始自学游戏ai-1非侵入式玩像素小鸟的第一部分`](https://blog.csdn.net/weixin_56760882/article/details/145848700)
     - 测试结果：
-        - ![Pong_v0](videos\evaluate.gif)
+        - ![Pong_v0](https://wild-firefox.github.io/videos/evaluate.gif)
         - 注：左边为游戏内置ai，右边为智能体ai
 
 
@@ -19,7 +19,7 @@ title: 项目详情
     - 代码：[`IPPO_for_pong`](https://github.com/wild-firefox/FreeRL_for_play/tree/main/IPPO_for_pong)   
     - 具体实现：[`【游戏ai】从强化学习开始自学游戏ai-2 使用IPPO自博弈对抗pongv3环境`](https://blog.csdn.net/weixin_56760882/article/details/147537066)
     - 测试结果：
-        - ![Pong_v0](videos\pong_animation_20250426_145439.gif)
+        - ![Pong_v0](https://wild-firefox.github.io/videos/pong_animation_20250426_145439.gif)
         - 注：左右两边均为智能体ai
 
 # 开发作品
@@ -39,4 +39,4 @@ title: 项目详情
     - 代码：[`RL_for_football_lottery`](https://github.com/wild-firefox/FreeRL_for_play/tree/main/RL_for_football_lottery)
     - 具体实现：[`RL_for_football_lottery的readme.md`](https://github.com/wild-firefox/FreeRL_for_play/blob/main/RL_for_football_lottery/readme.md)
     - 测试结果：
-        - ![Pong_v0](images\RL_for_football_lottery.png)
+        - ![Pong_v0](https://wild-firefox.github.io/images/RL_for_football_lottery.png)

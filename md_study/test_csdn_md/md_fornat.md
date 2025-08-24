@@ -12,7 +12,8 @@
     <img src="https://imgconvert.csdnimg.cn/aHR0cHM6Ly9hdmF0YXIuY3Nkbi5uZXQvNy83L0IvMV9yYWxmX2h4MTYzY29tLmpwZw" alt="Alt" width="30" height="30"/>
 </div>
 测试图片  
-![alt text](https://wild-firefox.github.io/md_study/test_csdn_md/image.png )  
+![alt text](https://wild-firefox.github.io/md_study/test_csdn_md/image.png)  
+`注:.png后不能有空格`
 
 # 欢迎使用Markdown编辑器
 
