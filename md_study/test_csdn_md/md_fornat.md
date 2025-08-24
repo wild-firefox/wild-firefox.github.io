@@ -122,12 +122,12 @@ var foo = 'bar';
 | 第一列文本居中 | 第二列文本居右  | 第三列文本居左 |
 
 ### SmartyPants
-SmartyPants将ASCII标点字符转换为“智能”印刷标点HTML实体。例如：
-|    TYPE   |ASCII                          |HTML
-|----------------|-------------------------------|-----------------------------|
-|Single backticks|`'Isn't this fun?'`            |'Isn't this fun?'            |
-|Quotes          |`"Isn't this fun?"`            |"Isn't this fun?"            |
-|Dashes          |`-- is en-dash, --- is em-dash`|-- is en-dash, --- is em-dash|
+SmartyPants将ASCII标点字符转换为“智能”印刷标点HTML实体。例如： 
+|    TYPE   |ASCII                          |HTML 
+|----------------|-------------------------------|-----------------------------| 
+|Single backticks|`'Isn't this fun?'`            |'Isn't this fun?'            | 
+|Quotes          |`"Isn't this fun?"`            |"Isn't this fun?"            | 
+|Dashes          |`-- is en-dash, --- is em-dash`|-- is en-dash, --- is em-dash| 
 
 ## 创建一个自定义列表
 Markdown
