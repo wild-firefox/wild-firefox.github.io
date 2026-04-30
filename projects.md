@@ -10,7 +10,8 @@ title: 项目详情
         - <video controls width="600">
             <source src="videos\展示视频.mp4" type="video/mp4">
             Your browser does not support the video tag.
-          </video>
+          </video> 
+
 # 技术探索
 - [2024/2/10：基于PPO算法的Atari_Pong_v0环境实现]  
     - 环境：[`Atari_Pong_v0`](https://www.gymlibrary.dev/environments/atari/pong-v0/) 
