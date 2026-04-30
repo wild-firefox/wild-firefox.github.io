@@ -3,7 +3,14 @@ layout: home
 title: 项目详情  
 ---
 <!-- 在网址栏输入：https://wild-firefox.github.io/projects/ -->
-
+# 比赛
+- [2021/4/：先进视觉3D目标识别比赛]  
+    - 赛题：先进视觉3D目标识别比赛
+    - 效果展示：
+        - <video controls width="600">
+            <source src="videos\展示视频.mp4" type="video/mp4">
+            Your browser does not support the video tag.
+          </video>
 # 技术探索
 - [2024/2/10：基于PPO算法的Atari_Pong_v0环境实现]  
     - 环境：[`Atari_Pong_v0`](https://www.gymlibrary.dev/environments/atari/pong-v0/) 
