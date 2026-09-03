@@ -1,6 +1,18 @@
 (() => {
   const root = document.documentElement;
   const page = document.body.dataset.page;
+  document.querySelectorAll('.desktop-nav, .mobile-nav').forEach((nav) => {
+    if (nav.querySelector('[data-page-link="outputs"]')) return;
+    const resumeLink = nav.querySelector('a[href="/resume"]');
+    if (!resumeLink) return;
+    const outputsLink = document.createElement('a');
+    outputsLink.href = '/publications';
+    outputsLink.dataset.pageLink = 'outputs';
+    outputsLink.dataset.zh = '科研成果';
+    outputsLink.dataset.en = 'Publications';
+    outputsLink.textContent = '科研成果';
+    resumeLink.before(outputsLink);
+  });
   const languageButton = document.querySelector('.language-toggle');
   const themeButton = document.querySelector('.theme-toggle');
   const menuButton = document.querySelector('.menu-toggle');

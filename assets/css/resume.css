@@ -98,6 +98,7 @@ svg { fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: 
 .entry h2,.entry h3 { margin: 0; font-size: 17px; }
 .entry .org { margin: 3px 0 10px; color: var(--accent); font-size: 12px; }
 .entry p { margin: 0; color: var(--muted); }
+.entry .detail-line { margin-top: 7px; }
 .entry .tags { margin-top: 14px; }
 .entry-links { display: flex; gap: 16px; margin-top: 12px !important; }
 .entry-links a { color: var(--accent); font-size: 12px; }
