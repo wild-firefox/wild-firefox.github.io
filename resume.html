@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#090b0f">
+    <meta name="description" content="顾家成的个人简历：强化学习、量化研发、分布式训练与世界模型。">
+    <title>简历｜顾家成</title><link rel="stylesheet" href="/assets/css/resume.css"><script src="/assets/js/resume.js" defer></script>
+  </head>
+  <body data-page="resume"><a class="skip-link" href="#main">跳至正文</a>
+    <header class="site-header"><div class="nav-wrap"><a class="site-name" href="/">顾家成</a><nav class="desktop-nav"><a href="/" data-page-link="home">首页</a><a href="/about" data-page-link="about">关于</a><a href="/projects" data-page-link="projects">项目经历</a><a href="/research" data-page-link="research">研究</a><a href="/resume" data-page-link="resume">简历</a><a href="/contact" data-page-link="contact">联系</a></nav><div class="nav-actions"><button class="language-toggle" type="button">EN</button><button class="theme-toggle" type="button" aria-label="切换主题"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41"/></svg></button><button class="menu-toggle" type="button" aria-expanded="false" aria-controls="mobile-nav"><span class="sr-only">菜单</span><span></span><span></span></button></div></div><nav class="mobile-nav" id="mobile-nav" hidden><a href="/">首页</a><a href="/about">关于</a><a href="/projects">项目经历</a><a href="/research">研究</a><a href="/resume" data-page-link="resume">简历</a><a href="/contact">联系</a></nav></header>
+
+    <main id="main" class="page-shell inner-page">
+      <header class="page-title resume-title">
+        <p class="kicker">RESUME</p><h1>顾家成</h1>
+        <p>强化学习 · 量化研发 · AI 工程</p>
+        <div class="resume-meta"><a href="mailto:wild_firefox@outlook.com">wild_firefox@outlook.com</a><a href="https://github.com/wild-firefox" target="_blank" rel="noreferrer">GitHub ↗</a><span>2027 届 · 求职方向：量化研究 / 强化学习算法</span></div>
+        <button class="button" type="button" data-print>打印 / 保存 PDF</button>
+      </header>
+
+      <section class="prose-section"><h2>个人简介</h2><p>南京邮电大学电子信息硕士在读，机器人工程本科背景。聚焦深度强化学习及其工程化落地，实践覆盖量化交易策略、Actor–Learner 分布式训练框架、多智能体算法、工业世界模型与纯视觉游戏智能体。</p></section>
+
+      <section class="resume-section"><h2>核心项目</h2>
+        <article class="entry"><time>2026.03 — 2026.05</time><div><h3>ETF 量化强化学习策略原型（个人开源项目）</h3><p class="org">Python · PyTorch · PPO · Gymnasium</p><ul class="bullet-list"><li>实习前独立完成 ETF 轮动原型，设计规则动作空间、状态表示与奖励函数。</li><li>搭建 PPO 训练与样本外评估流程，并开源代码及实验结果。</li></ul><p class="entry-links"><a href="https://github.com/wild-firefox/FreeRL_trader" target="_blank" rel="noreferrer">代码与实验 ↗</a></p></div></article>
+        <article class="entry"><time>2024.09 — 2025.08</time><div><h3>多智能体强化学习联合科研项目</h3><p class="org">MARL · 动作掩码 · 环境并行加速</p><p>围绕复杂环境中的智能体任务表现开展研究，负责算法设计、动作掩码与并行环境方案。</p></div></article>
+      </section>
+
+      <section class="resume-section"><h2>实习经历</h2>
+        <article class="entry"><time>2026.06 — 至今</time><div><h3>量化研发实习生</h3><p class="org">杭州零界演化科技有限公司</p><ul class="bullet-list"><li>负责 ETF 动量 PPO 轮动策略，设计 8 个离散动作（7 种持仓配置与现金），完成状态、奖励和交易环境迭代；纳入手续费、整手交易、现金约束与避免重复调仓。</li><li>搭建 11 折 WFO，每折采用 120 日预热、750 日训练与 60 日样本外测试，对 5 个随机种子进行 MWU 动态加权。</li><li>2023.10.10—2026.06.30 连续 660 个样本外交易日累计收益 <strong>216.4%</strong>、年化收益 <strong>54.7%</strong>、Sharpe <strong>1.927</strong>、最大回撤 <strong>20.0%</strong>；同期沪深 300 收益 <strong>35.1%</strong>。</li><li>基于 QMT 完成模型加载、每日行情更新、账户状态保存和先卖后买委托，处理停牌延迟、手续费与资金检查；2026.08.24 接入真实资金运行，并通过聚宽与本地回测逐笔核对成交。</li></ul><div class="tags"><span>PPO</span><span>WFO</span><span>MWU</span><span>QMT</span><span>聚宽</span></div></div></article>
+        <article class="entry"><time>2025.09 — 2026.03</time><div><h3>研发算法岗</h3><p class="org">昕彤赋能（长沙）人工智能有限公司</p><ul class="bullet-list"><li>基于 MAGAIL 与水务数据构建高保真虚拟污水处理厂，将状态解耦为动作关联维度与环境自身演化维度，使环境网络聚焦动作影响的状态。</li><li>设计两阶段强化学习与模仿学习框架：前置阶段结合判别器、策略/环境生成器、价值网络、BC 损失和 PPO 进行对抗训练；后置阶段在固定环境网络上训练策略。</li><li>搭建训练集/验证集双环境验证与多维评估体系，追踪 Rollout MAE、专家轨迹特征和离线归一化结果；低信噪比环境预测效果优于 LSTM 时序预测方案。</li></ul><div class="tags"><span>GAIL</span><span>BC</span><span>PPO</span><span>World Model</span></div></div></article>
+        <article class="entry"><time>2025.03 — 2025.09</time><div><h3>强化学习算法岗</h3><p class="org">北京智信卫通科技有限责任公司</p><ul class="bullet-list"><li>基于 Ray 设计并实现 Actor–Learner 分离的分布式强化学习框架，单机双卡训练速度达到单卡约 <strong>2 倍</strong>。</li><li>支持混合动作 PPO 与自博弈训练；结合 PyTorch 分布式、Linux 和消息队列完成框架搭建。</li><li>使用 ActiveMQ 发布/订阅模式，实现训练端机器与环境部署端机器在同网段内通信。</li></ul><div class="tags"><span>Ray</span><span>PyTorch Distributed</span><span>ActiveMQ</span><span>Self-play</span></div></div></article>
+      </section>
+
+      <section class="resume-section"><h2>教育经历</h2>
+        <article class="entry"><time>2024.09 — 2027.06</time><div><h3>南京邮电大学</h3><p class="org">电子信息 · 硕士研究生</p><p>研究生阶段成果：专利 1 项、期刊论文 1 篇。相关课程：深度强化学习、深度学习理论及应用。</p></div></article>
+        <article class="entry"><time>2020.09 — 2024.06</time><div><h3>南京工程学院</h3><p class="org">机器人工程 · 工学学士</p><p>一等奖学金、校级三好学生、优秀毕业生。相关课程：程序设计技术与应用、机器人视觉、人工智能基础、微处理器及其应用。</p></div></article>
+      </section>
+
+      <section class="resume-section"><h2>竞赛荣誉</h2>
+        <article class="entry"><time>2023</time><div><h3>全国大学生电子设计竞赛 · 一等奖</h3><p>3 人团队完成激光追踪二维云台系统；负责旋转黑边矩形的 OpenCV 识别与定位。</p></div></article>
+        <article class="entry"><time>2022</time><div><h3>江苏省大学生电子设计竞赛 · 省级二等奖</h3><p>3 人团队基于 TI 芯片实现后车跟随、循迹和弯道超车；负责状态机控制逻辑与 PID 调速。</p></div></article>
+        <article class="entry"><time>2022</time><div><h3>中国机器人及人工智能大赛（智慧农业）· 国家三等奖</h3></div></article>
+        <article class="entry"><time>2021.11 — 2022.04</time><div><h3>中国机器人大赛暨 RoboCup 机器人世界杯中国赛 · 国家三等奖</h3><p>3 人团队使用 Jetson Nano 与深度摄像头完成食品/水果 3D 识别；负责 YOLOv5 数据集训练与部署。</p></div></article>
+      </section>
+
+      <section class="resume-section"><h2>专业能力</h2><div class="skill-lines"><p><strong>强化学习：</strong>PPO、MARL、GAIL、BC、自博弈、动作掩码</p><p><strong>工程框架：</strong>PyTorch、Ray、ActiveMQ、Linux、Git</p><p><strong>环境建模：</strong>世界模型、低信噪比预测、仿真交易环境</p><p><strong>计算机视觉：</strong>OpenCV、YOLOv5、纯视觉智能体</p><p><strong>嵌入式：</strong>C/C++、状态机、PID、Jetson Nano</p><p><strong>证书：</strong>CET-4、CET-6</p></div><p class="entry-links"><a href="https://github.com/wild-firefox/FreeRL" target="_blank" rel="noreferrer">FreeRL 强化学习库 ↗</a><a href="https://github.com/wild-firefox/stock_policy" target="_blank" rel="noreferrer">stock_policy 策略项目 ↗</a></p></section>
+    </main>
+    <footer class="site-footer"><div><strong>Jiacheng Gu</strong><p>顾家成 · 强化学习 · AI 工程</p></div><div class="footer-links"><a href="https://github.com/wild-firefox">GitHub</a><a href="mailto:wild_firefox@outlook.com">Email</a></div><p>© <span id="year">2026</span> Jiacheng Gu.</p></footer>
+  </body>
+</html>
