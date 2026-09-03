@@ -2,28 +2,39 @@
   const root = document.documentElement;
   const page = document.body.dataset.page;
   document.querySelectorAll('.desktop-nav, .mobile-nav').forEach((nav) => {
-    if (nav.querySelector('[data-page-link="outputs"]')) return;
     const resumeLink = nav.querySelector('a[href="/resume"]');
     if (!resumeLink) return;
-    const outputsLink = document.createElement('a');
-    outputsLink.href = '/publications';
-    outputsLink.dataset.pageLink = 'outputs';
-    outputsLink.dataset.zh = '科研成果';
-    outputsLink.dataset.en = 'Publications';
-    outputsLink.textContent = '科研成果';
-    resumeLink.before(outputsLink);
+    if (!nav.querySelector('[data-page-link="outputs"]')) {
+      const outputsLink = document.createElement('a');
+      outputsLink.href = '/publications';
+      outputsLink.dataset.pageLink = 'outputs';
+      outputsLink.dataset.zh = '科研成果';
+      outputsLink.dataset.en = 'Publications';
+      outputsLink.textContent = '科研成果';
+      resumeLink.before(outputsLink);
+    }
+    if (!nav.querySelector('[data-page-link="blog"]')) {
+      const blogLink = document.createElement('a');
+      blogLink.href = '/blog';
+      blogLink.dataset.pageLink = 'blog';
+      blogLink.dataset.zh = '博客';
+      blogLink.dataset.en = 'Blog';
+      blogLink.textContent = '博客';
+      resumeLink.before(blogLink);
+    }
   });
   const languageButton = document.querySelector('.language-toggle');
   const themeButton = document.querySelector('.theme-toggle');
   const menuButton = document.querySelector('.menu-toggle');
   const mobileNav = document.querySelector('.mobile-nav');
-  const bilingualPages = new Set(['home', 'about', 'projects', 'research', 'outputs', 'resume', 'contact']);
+  const bilingualPages = new Set(['home', 'about', 'projects', 'research', 'outputs', 'blog', 'resume', 'contact']);
   const navigationLabels = new Map([
     ['/', ['首页', 'Home']],
     ['/about', ['关于', 'About']],
     ['/projects', ['项目经历', 'Projects']],
     ['/research', ['研究', 'Research']],
     ['/publications', ['科研成果', 'Publications']],
+    ['/blog', ['博客', 'Blog']],
     ['/resume', ['简历', 'Resume']],
     ['/contact', ['联系', 'Contact']],
   ]);
@@ -135,6 +146,8 @@
     ['官方检索', 'Official Lookup'],
     ['专利状态以国家知识产权局公开信息为准。', 'Patent status is subject to the official records of the China National Intellectual Property Administration.'],
     ['国家知识产权局专利检索 ↗', 'CNIPA Patent Search ↗'],
+    ['博客', 'Blog'],
+    ['技术文章、量化研究记录与策略社区主页。', 'Technical articles, quantitative research notes, and strategy community profiles.'],
     ['联系我', 'Contact Me'],
     ['欢迎交流量化研究、强化学习算法及相关合作机会。', 'Open to opportunities and collaboration in quantitative research and reinforcement-learning algorithms.'],
     ['目标方向', 'Target Roles'],
@@ -208,6 +221,7 @@
     ['projects', ['项目经历｜顾家成', 'Projects | Jiacheng Gu']],
     ['research', ['研究｜顾家成', 'Research | Jiacheng Gu']],
     ['outputs', ['科研成果｜顾家成', 'Publications & Patents | Jiacheng Gu']],
+    ['blog', ['博客｜顾家成', 'Blog | Jiacheng Gu']],
     ['resume', ['简历｜顾家成', 'Resume | Jiacheng Gu']],
     ['contact', ['联系｜顾家成', 'Contact | Jiacheng Gu']],
   ]);
