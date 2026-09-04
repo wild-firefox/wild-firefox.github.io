@@ -106,7 +106,7 @@ svg { fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: 
 .entry p { margin: 0; color: var(--muted); }
 .entry .detail-line { margin-top: 7px; }
 .entry .tags { margin-top: 14px; }
-.entry-links { display: flex; gap: 16px; margin-top: 12px !important; }
+.entry-links { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 12px !important; }
 .entry-links a { color: var(--accent); font-size: 12px; }
 .project-media { display: block; width: min(100%, 620px); max-height: 360px; margin-top: 18px; object-fit: contain; border: 1px solid var(--line); border-radius: 8px; background: #050608; }
 .profile-grid { display: grid; grid-template-columns: 120px minmax(0,1fr); gap: 30px; }
