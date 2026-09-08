@@ -124,7 +124,6 @@
     ['研究方向', 'Research'],
     ['围绕强化学习策略、训练系统、环境建模与真实场景验证展开。', 'Research on reinforcement-learning policies, training systems, environment modeling, and real-world validation.'],
     ['量化强化学习', 'Quantitative Reinforcement Learning'],
-    ['研究 ETF 动量 PPO 轮动策略与交易落地：设计 8 个离散动作，使用 11 折 WFO 和 5 个随机种子的 MWU 动态加权控制过拟合，并通过 QMT 接入真实资金运行。660 个样本外交易日累计收益 216.4%、年化收益 54.7%、Sharpe 1.927。', 'Developed and deployed an ETF momentum PPO rotation strategy with eight discrete actions, 11-fold WFO, and MWU dynamic weighting across five random seeds; connected the strategy to live capital through QMT. Across 660 out-of-sample trading days, cumulative return was 216.4%, annualized return 54.7%, and Sharpe 1.927.'],
     ['分布式强化学习', 'Distributed Reinforcement Learning'],
     ['基于 Ray 实现 Actor–Learner 分离架构，支持混合动作 PPO、自博弈和并行采样；单机双卡训练速度达到单卡约 2 倍，并通过 ActiveMQ 连接训练端与环境端。', 'Implemented a Ray-based Actor–Learner architecture supporting hybrid-action PPO, self-play, and parallel sampling; dual-GPU throughput reached about twice that of a single GPU, with ActiveMQ connecting training and environment hosts.'],
     ['世界模型与模仿学习', 'World Models & Imitation Learning'],
