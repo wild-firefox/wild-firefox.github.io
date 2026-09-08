@@ -231,6 +231,38 @@
     link.dataset.zh = labels[0];
     link.dataset.en = labels[1];
   });
+  const networkConnection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+  const navigationLinks = [...document.querySelectorAll('.desktop-nav a, .mobile-nav a')];
+  const prefetchedPages = new Set();
+  const normalizePath = (pathname) => pathname.replace(/\/index\.html$/, '/').replace(/\.html$/, '').replace(/\/$/, '') || '/';
+  const prefetchPage = (link) => {
+    if (networkConnection?.saveData) return;
+    const href = link.getAttribute('href');
+    if (!href) return;
+    const url = new URL(href, window.location.href);
+    const route = normalizePath(url.pathname);
+    if (url.origin !== window.location.origin || route === normalizePath(window.location.pathname) || prefetchedPages.has(route)) return;
+    const hint = document.createElement('link');
+    hint.rel = 'prefetch';
+    hint.as = 'document';
+    hint.href = url.href;
+    document.head.append(hint);
+    prefetchedPages.add(route);
+  };
+  navigationLinks.forEach((link) => {
+    link.addEventListener('pointerenter', () => prefetchPage(link), { once: true, passive: true });
+    link.addEventListener('focus', () => prefetchPage(link), { once: true });
+    link.addEventListener('touchstart', () => prefetchPage(link), { once: true, passive: true });
+  });
+  if (!networkConnection?.saveData && !['slow-2g', '2g'].includes(networkConnection?.effectiveType)) {
+    const warmNavigation = () => navigationLinks.forEach(prefetchPage);
+    const scheduleWarmNavigation = () => {
+      if ('requestIdleCallback' in window) window.requestIdleCallback(warmNavigation, { timeout: 1800 });
+      else window.setTimeout(warmNavigation, 1200);
+    };
+    if (document.readyState === 'complete') scheduleWarmNavigation();
+    else window.addEventListener('load', scheduleWarmNavigation, { once: true });
+  }
   const skipLink = document.querySelector('.skip-link');
   if (skipLink) { skipLink.dataset.zh = '跳至正文'; skipLink.dataset.en = 'Skip to content'; }
   const siteName = document.querySelector('.site-name');
