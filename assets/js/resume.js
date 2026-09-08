@@ -43,7 +43,6 @@
     ['顾家成 · 强化学习 · AI 工程', 'Reinforcement Learning · Quant Research · AI Engineering'],
     ['菜单', 'Menu'],
     ['2026.06 — 至今', '2026.06 — Present'],
-    ['2026.05 — 至今', '2026.05 — Present'],
     ['项目经历', 'Projects'],
     ['量化强化学习、分布式系统、工业世界模型、机器人视觉与游戏 AI 实践。', 'Projects in quantitative reinforcement learning, distributed systems, industrial world models, robot vision, and game AI.'],
     ['全部', 'All'],
