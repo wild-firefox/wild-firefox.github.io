@@ -3,7 +3,18 @@
   const page = document.body.dataset.page;
   document.querySelectorAll('.desktop-nav, .mobile-nav').forEach((nav) => {
     const resumeLink = nav.querySelector('a[href="/resume"]');
+    const projectsLink = nav.querySelector('a[href="/projects"]');
     if (!resumeLink) return;
+    if (projectsLink && !nav.querySelector('[data-page-link="dashboard"]')) {
+      const dashboardLink = document.createElement('a');
+      dashboardLink.href = '/etf-dashboard';
+      dashboardLink.dataset.pageLink = 'dashboard';
+      dashboardLink.dataset.zh = 'ETF 看板';
+      dashboardLink.dataset.en = 'ETF Dashboard';
+      dashboardLink.dataset.noPrefetch = 'true';
+      dashboardLink.textContent = 'ETF 看板';
+      projectsLink.after(dashboardLink);
+    }
     if (!nav.querySelector('[data-page-link="outputs"]')) {
       const outputsLink = document.createElement('a');
       outputsLink.href = '/publications';
@@ -32,6 +43,7 @@
     ['/', ['首页', 'Home']],
     ['/about', ['关于', 'About']],
     ['/projects', ['项目经历', 'Projects']],
+    ['/etf-dashboard', ['ETF 看板', 'ETF Dashboard']],
     ['/research', ['研究', 'Research']],
     ['/publications', ['科研成果', 'Publications']],
     ['/blog', ['博客', 'Blog']],
@@ -236,6 +248,7 @@
     ['home', ['顾家成｜强化学习研究与 AI 工程', 'Jiacheng Gu | Reinforcement Learning & AI Engineering']],
     ['about', ['关于｜顾家成', 'About | Jiacheng Gu']],
     ['projects', ['项目经历｜顾家成', 'Projects | Jiacheng Gu']],
+    ['dashboard', ['ETF 策略看板｜顾家成', 'ETF Strategy Dashboard | Jiacheng Gu']],
     ['research', ['研究｜顾家成', 'Research | Jiacheng Gu']],
     ['outputs', ['科研成果｜顾家成', 'Publications & Patents | Jiacheng Gu']],
     ['blog', ['博客｜顾家成', 'Blog | Jiacheng Gu']],
@@ -254,6 +267,7 @@
   const normalizePath = (pathname) => pathname.replace(/\/index\.html$/, '/').replace(/\.html$/, '').replace(/\/$/, '') || '/';
   const prefetchPage = (link) => {
     if (networkConnection?.saveData) return;
+    if (link.dataset.noPrefetch === 'true') return;
     const href = link.getAttribute('href');
     if (!href) return;
     const url = new URL(href, window.location.href);
