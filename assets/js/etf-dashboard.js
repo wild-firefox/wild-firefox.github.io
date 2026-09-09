@@ -31,9 +31,9 @@
   };
   const scheduleTheme = () => window.requestAnimationFrame(applyPlotTheme);
   window.addEventListener('load', scheduleTheme, { once: true });
+  window.addEventListener('etf-dashboard:charts-ready', scheduleTheme);
   new MutationObserver(scheduleTheme).observe(document.documentElement, {
     attributes: true,
     attributeFilter: ['data-theme'],
   });
 })();
-
