@@ -185,6 +185,8 @@
     ['2027 年', '2027'],
     ['工作地点', 'Work Location'],
     ['不限', 'Flexible'],
+    ['籍贯', 'Hometown'],
+    ['江苏苏州张家港', 'Zhangjiagang, Suzhou, Jiangsu'],
     ['技术博客 ↗', 'Technical Blog ↗'],
     ['聚宽主页 ↗', 'JoinQuant Profile ↗'],
     ['强化学习 · 量化研发 · AI 工程', 'Reinforcement Learning · Quant Research · AI Engineering'],
