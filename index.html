@@ -14,6 +14,8 @@
     <title>顾家成｜强化学习研究与 AI 工程</title>
     <link rel="stylesheet" href="/assets/css/resume.css?v=20260908" />
     <script src="/assets/js/resume.js?v=20260909" defer></script>
+    <link rel="stylesheet" href="/assets/css/guangyin-promo.css?v=0359" />
+    <script src="/assets/js/guangyin-promo.js?v=0359" defer></script>
   </head>
   <body data-page="home">
     <a class="skip-link" href="#main" data-zh="跳至正文" data-en="Skip to content">跳至正文</a>
@@ -67,9 +69,31 @@
         </div>
       </section>
       <section class="home-section" aria-labelledby="guangyin-title">
-        <div class="section-heading"><span>PLAY</span><h2 id="guangyin-title" data-zh="光音 · 光路解谜" data-en="Guangyin · Light and melody">光音 · 光路解谜</h2></div>
-        <a href="/games/guangyin/" aria-label="开始游玩光音"><img src="/games/guangyin/assets/presentation/home-background.png" alt="光音中的演奏者与流动的光路" loading="lazy" style="display:block;width:100%;max-height:340px;object-fit:cover;object-position:center 40%;border-radius:16px" /></a>
-        <p data-zh="连接光路，逐关收集旋律。不用登录也能玩，进度自动保存在当前浏览器；提示和参考答案免费查看。" data-en="Connect light paths and collect melodies. Play without signing in; progress saves in this browser. Hints and solutions are free.">连接光路，逐关收集旋律。不用登录也能玩，进度自动保存在当前浏览器；提示和参考答案免费查看。</p>
+        <div class="section-heading"><span>PLAY</span><h2 id="guangyin-title" data-zh="光音 · 自制光路解谜小游戏" data-en="Guangyin · An indie light-path puzzle">光音 · 自制光路解谜小游戏</h2></div>
+        <div class="gy-promo">
+          <div class="gy-copy"><span class="gy-kicker">LIGHT INTO MELODY</span><h3 data-zh="移动一颗器材，接通一束光。" data-en="Move a relay. Connect a beam of light.">移动一颗器材，接通一束光。</h3><p data-zh="把器材拖进光圈，让光从起点传到目标。点亮一关，收藏一段旋律。" data-en="Drag a relay into a slot and guide light to the target. Solve a puzzle, collect a melody.">把器材拖进光圈，让光从起点传到目标。点亮一关，收藏一段旋律。</p></div>
+          <div class="gy-demo">
+            <div class="gy-demo-head"><span>第一关 · 先接上一盏</span><button type="button" class="gy-pause" data-gy-pause aria-pressed="false">暂停演示</button></div>
+            <svg viewBox="0 65 740 500" role="img" aria-labelledby="gy-demo-title gy-demo-desc">
+              <title id="gy-demo-title">第一关玩法演示</title><desc id="gy-demo-desc">金色分流器从左上方的圈移动到起点右侧，再发射光线，经分流器点亮右上方的菱形目标。</desc>
+              <g fill="none" stroke="#95b6aa" stroke-width="2" stroke-dasharray="4 7" opacity=".65">
+                <circle cx="200" cy="140" r="34"/><circle cx="340" cy="140" r="34"/><circle cx="480" cy="140" r="34"/><circle cx="620" cy="140" r="34"/>
+                <circle cx="200" cy="320" r="34"/><circle cx="340" cy="320" r="34"/><circle cx="480" cy="320" r="34"/><circle cx="620" cy="320" r="34"/>
+                <circle cx="200" cy="500" r="34"/><circle cx="340" cy="500" r="34"/><circle cx="480" cy="500" r="34"/><circle cx="620" cy="500" r="34"/>
+              </g>
+              <circle class="gy-range" cx="200" cy="320" r="190" fill="#f2d682" stroke="#bc9747" stroke-width="2" stroke-dasharray="4 8"/>
+              <path d="M60 320H200L270 230" stroke="#74a698" stroke-width="2" stroke-dasharray="5 7" fill="none" opacity=".25"/>
+              <path class="gy-route" d="M60 320H200L270 230" pathLength="1" stroke="#228b78" stroke-width="6" fill="none" stroke-linecap="round"/>
+              <circle cx="60" cy="320" r="38" fill="#d5e9dc" stroke="#8dbbaa" stroke-width="2"/><circle class="gy-fire" cx="60" cy="320" r="30" stroke="#298775" stroke-width="3"/><path d="M52 307L72 320L52 333Z" fill="#216b60"/>
+              <g class="gy-relay"><circle cx="200" cy="140" r="38" fill="#f7e4ac" stroke="#c9a76b" stroke-width="2"/><circle cx="200" cy="140" r="29" fill="#fff0c5" stroke="#b18335" stroke-width="3"/><g fill="#ac7a29"><circle cx="200" cy="140" r="8"/><circle cx="200" cy="123" r="3"/><circle cx="200" cy="157" r="3"/><circle cx="183" cy="140" r="3"/><circle cx="217" cy="140" r="3"/></g></g>
+              <path class="gy-cursor" d="M220 151L220 183L229 175L236 189L244 185L237 171L250 170Z" fill="#fff" stroke="#254e4e" stroke-width="2"/>
+              <path class="gy-goal" d="M270 207L293 230L270 253L247 230Z" fill="#f5f8ed" stroke="#6b9690" stroke-width="3"/><text x="270" y="237" text-anchor="middle" font-size="21" fill="#35655b">1</text>
+              <g class="gy-done"><rect x="416" y="290" width="238" height="58" rx="29" fill="#1d7967"/><text x="535" y="327" text-anchor="middle" font-size="23" fill="#fff">✓ 全部接通</text></g>
+            </svg>
+            <div class="gy-demo-foot">拖动器材 → 发射光线 → 点亮目标</div>
+          </div>
+        </div>
+        <p class="gy-note"><strong data-zh="自己做的一款小游戏，在 TapTap 搜索「光音」也能玩。" data-en="An indie game I made. You can also find Guangyin on TapTap.">自己做的一款小游戏，在 TapTap 搜索「光音」也能玩。</strong><br><span data-zh="网页无需登录，逐关解锁并自动保存；提示和参考答案免费查看。在游戏「设置」中登录同一个 TapTap 账号，即可同步网页与 TapTap 的进度。" data-en="Play without signing in, with automatic saves and free hints. Sign in to the same TapTap account in Settings to sync progress across the web and TapTap.">网页无需登录，逐关解锁并自动保存；提示和参考答案免费查看。在游戏「设置」中登录同一个 TapTap 账号，即可同步网页与 TapTap 的进度。</span><small data-zh="TapTap 跨端同步需使用支持同步的新版本；新包目前正在更新流程中。" data-en="Cross-platform sync requires a compatible TapTap build; the new release is being processed.">TapTap 跨端同步需使用支持同步的新版本；新包目前正在更新流程中。</small></p>
         <a class="button primary" href="/games/guangyin/" data-zh="开始游戏 →" data-en="Play now →">开始游戏 →</a>
       </section>
       <section class="home-section">
