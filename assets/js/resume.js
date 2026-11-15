@@ -54,7 +54,7 @@
     ['顾家成', 'Jiacheng Gu'],
     ['顾家成 · 强化学习 · AI 工程', 'Reinforcement Learning · Quant Research · AI Engineering'],
     ['菜单', 'Menu'],
-    ['2026.06 — 至今', '2026.06 — Present'],
+    ['2026.05 — 2026.09', 'May 2026 — September 2026'],
     ['项目经历', 'Projects'],
     ['量化强化学习、分布式系统、工业世界模型、机器人视觉与游戏 AI 实践。', 'Projects in quantitative reinforcement learning, distributed systems, industrial world models, robot vision, and game AI.'],
     ['全部', 'All'],
@@ -180,7 +180,7 @@
     ['联系我', 'Contact Me'],
     ['欢迎交流量化研究、强化学习算法及相关合作机会。', 'Open to opportunities and collaboration in quantitative research and reinforcement-learning algorithms.'],
     ['目标方向', 'Target Roles'],
-    ['量化研究 / 强化学习算法', 'Quantitative Research / RL Algorithms'],
+    ['强化学习算法工程师', 'Reinforcement Learning Algorithm Engineer'],
     ['预计毕业', 'Expected Graduation'],
     ['2027 年', '2027'],
     ['工作地点', 'Work Location'],
@@ -190,7 +190,7 @@
     ['技术博客 ↗', 'Technical Blog ↗'],
     ['聚宽主页 ↗', 'JoinQuant Profile ↗'],
     ['强化学习 · 量化研发 · AI 工程', 'Reinforcement Learning · Quant Research · AI Engineering'],
-    ['2027 届 · 求职方向：量化研究 / 强化学习算法', 'Class of 2027 · Target Roles: Quantitative Research / RL Algorithms'],
+    ['2027 届 · 求职方向：强化学习算法工程师', 'Class of 2027 · Target Role: Reinforcement Learning Algorithm Engineer'],
     ['打印 / 保存 PDF', 'Print / Save PDF'],
     ['个人简介', 'Profile'],
     ['南京邮电大学电子信息硕士在读，机器人工程本科背景。聚焦深度强化学习及其工程化落地，实践覆盖量化交易策略、Actor–Learner 分布式训练框架、多智能体算法、工业世界模型与纯视觉游戏智能体。', 'M.E. candidate in Electronic Information at Nanjing University of Posts and Telecommunications with a B.E. in Robotics Engineering. Focused on deep reinforcement learning and engineering deployment across quantitative strategies, Actor–Learner distributed training, multi-agent algorithms, industrial world models, and vision-only agents.'],
@@ -241,7 +241,7 @@
     ['计算机视觉：', 'Computer Vision:'],
     ['OpenCV、YOLOv5、纯视觉智能体', 'OpenCV, YOLOv5, Vision-Only Agents'],
     ['嵌入式：', 'Embedded Systems:'],
-    ['C/C++、状态机、PID、Jetson Nano', 'C/C++, State Machines, PID, Jetson Nano'],
+    ['C/C++、状态机、PID、Jetson Nano、ROS2', 'C/C++, State Machines, PID, Jetson Nano, ROS2'],
     ['证书：', 'Certificates:'],
     ['FreeRL 强化学习库 ↗', 'FreeRL Library ↗'],
     ['stock_policy 策略项目 ↗', 'stock_policy Strategy Project ↗'],
@@ -358,4 +358,9 @@
   menuButton.addEventListener('click', () => { const open = menuButton.getAttribute('aria-expanded') === 'true'; menuButton.setAttribute('aria-expanded', String(!open)); mobileNav.hidden = open; });
   document.querySelector('[data-print]')?.addEventListener('click', () => window.print());
   document.querySelector('#year').textContent = new Date().getFullYear();
+  // Shared across profile pages; the independent module delays third-party loading.
+  const statisticsScript = document.createElement('script');
+  statisticsScript.src = '/assets/js/site-stats.js?v=20261116';
+  statisticsScript.async = true;
+  document.head.append(statisticsScript);
 })();

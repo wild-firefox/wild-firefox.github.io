@@ -3,3 +3,8 @@
 
 # Local Codex review artifacts
 /.codex/
+
+# Local documents, private application materials, and preview artifacts
+/output/
+/outputs/
+/tmp/
