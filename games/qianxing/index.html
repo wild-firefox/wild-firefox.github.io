@@ -1,0 +1,3736 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>牵星 QIANXING · 你就是引力</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #04060d; }
+  canvas { display: block; touch-action: none; cursor: crosshair; }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<script>
+/* ============================================================
+ * 牵星 QIANXING · 01_boot.js
+ * 确定性物理核心 —— 引擎、预测线、模拟器三方共用的唯一实现
+ * （DESIGN.md §2/§3：半隐式欧拉、分档子步、rails 递推、燃料经济、吞没判定）
+ * 本文件禁止任何 DOM/浏览器 API。
+ * ============================================================ */
+'use strict';
+
+const TAU = Math.PI * 2;
+const RAD = Math.PI / 180;
+
+/* ---------- CFG 常量表（DESIGN §3.1） ---------- */
+const CFG = {
+  G: 6600,                 // px³/(s²·mass)
+  DT: 1 / 120,             // 固定物理步长
+  EPS: 12,                 // 引力软化 ε
+  VMAX: 1000,              // 船速钳制
+  SHIP_R: 6,               // 船半径
+  // 玩家黑洞
+  BH_MU: 1.2e6,            // 基础引力
+  IGNITE: 2.2,             // 点火倍率
+  BH_R: 16,                // 视界（视觉）
+  BH_EAT: 22,              // 吞没判定距离（R+6）
+  EAT_STEPS: 14,           // 吞没持续步数（0.1167s）
+  STRETCH: 40,             // 拉伸警示带外沿（2.5R）
+  STRETCH_MIN: 22,         // 拉伸带内沿（吞没线）
+  K: 6,                    // 黑洞光标阻尼系数
+  WAKE_T: 0.1,             // 唤醒 μ 线性升满时间
+  // 燃料
+  FUEL_MAX: 1.2,           // 满罐秒数（限燃料日 0.8）
+  FUEL_REGEN: 1 / 3,       // 每秒回充比例（3s 回满）
+  FUEL_GATE: 0.15,         // 耗尽后再点火门槛
+  // 流程
+  CHARGE: 0.6,             // 首杆充能
+  QUICK: 0.2,              // 死亡后急充
+  SCUTTLE_DISSOLVE: 0.25,  // 弃船溶解
+  SCUTTLE_CHARGE: 0.3,     // 弃船后急充
+  LOST_T: 0.8,             // 死亡定格
+  SKIP_AFTER: 0.25,        // 定格多久后可跳过
+  TIMEOUT: 20,             // 单杆超时
+  OOB: { x0: -80, x1: 1680, y0: -80, y1: 980 }, // 出界线（含 80px 余量环）
+  // 世界
+  W: 1600, H: 900, MARGIN: 80,
+  // 掠过档位（相对天体表面 r+）
+  GRAZE: { g1: 90, g2: 45, g3: 18, p1: 100, p2: 250, p3: 500 },
+  NEAR_MISS: 1.2,          // 虫洞近失倍数
+  NEAR_MISS_WIDE: 2.2,     // 白闪环倍数
+};
+
+function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+
+/* mulberry32 确定性随机（日更护送用） */
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function muOf(b) { return CFG.G * b.mass * (b.type === 'repulsor' ? -1 : 1); }
+
+function parkOf(level) {
+  return { x: clamp(level.start.x + 60, 60, 1540), y: 60 };
+}
+
+/* ---------- rails：天体轨道（§2.8 确定性递推） ---------- */
+function railInit(b) {
+  const m = b.movement;
+  if (!m) { b._rail = null; return; }
+  if (m.kind === 'orbit') {
+    const a = m.phaseDeg * RAD;
+    b._rail = {
+      kind: 'orbit', cx: m.cx, cy: m.cy, R: m.radius,
+      ca: Math.cos(a), sa: Math.sin(a),
+      cd: Math.cos(TAU / (m.periodSec * 120)), sd: Math.sin(TAU / (m.periodSec * 120)),
+    };
+  } else {
+    b._rail = { kind: 'line', ax: m.ax, ay: m.ay, bx: m.bx, by: m.by, ph: m.phaseDeg * RAD, dph: TAU / (m.periodSec * 120) };
+  }
+}
+function railStep(b) {
+  const r = b._rail;
+  if (!r) return;
+  if (r.kind === 'orbit') {
+    const ca = r.ca * r.cd - r.sa * r.sd;
+    const sa = r.sa * r.cd + r.ca * r.sd;
+    r.ca = ca; r.sa = sa;
+    b.x = r.cx + r.R * ca;
+    b.y = r.cy + r.R * sa;
+  } else {
+    r.ph += r.dph;
+    const u = (1 - Math.cos(r.ph)) / 2;
+    b.x = r.ax + (r.bx - r.ax) * u;
+    b.y = r.ay + (r.by - r.ay) * u;
+  }
+}
+
+/* ---------- 世界构造 ---------- */
+function makeWorld(level, opts) {
+  opts = opts || {};
+  const park = parkOf(level);
+  const W = {
+    id: level.id, level: level,
+    t: 0,                       // 关卡内物理时间（载入即计时，含充能与补发等待）
+    phase: 'charge',            // charge | flight | lost | done
+    phaseT: 0,
+    chargeDur: CFG.CHARGE,
+    lostDur: CFG.LOST_T,
+    strokes: 0,                 // 杆数（发射即记）
+    levelIgnited: false,        // 本关是否点过火（零点火奖励的反面）
+    strokeIgnite: false,
+    flightT: 0,
+    deadCause: null,            // {type, body?, x?, y?}
+    nearMissMin: Infinity,      // 本杆与虫洞最小距离
+    fuelMode: opts.fuelMax || CFG.FUEL_MAX,
+    noIgniteMode: !!opts.noIgnite,
+    disableSwallow: level.id === 'c1-l1',
+    target: level.target,
+    ship: null,                 // {x,y,vx,vy}
+    v0: 0,                      // 本杆发射速度（弹弓增速判定基准）
+    _slung: false,              // 本杆是否已触发弹弓高光
+    bh: {
+      x: park.x, y: park.y, tx: park.x, ty: park.y,
+      fuel: 1,                  // 罐比例 [0,1]（排空速率 = 1/fuelMode 每秒）
+      ignite: false, hold: false,
+      wake: false, wakeT: 0,
+      eatSteps: 0, everEmpty: false,
+    },
+    bodies: [],
+    graze: [],                  // 每天体 {min, prev, peaked}
+    events: [],
+  };
+  for (const src of level.bodies) {
+    const b = { x: src.x, y: src.y, mass: src.mass, r: src.r, type: src.type, hue: src.hue, movement: src.movement, mu: muOf(src) };
+    railInit(b);
+    W.bodies.push(b);
+  }
+  resetGraze(W);
+  return W;
+}
+
+function resetGraze(W) {
+  W.graze = W.bodies.map(() => ({ min: Infinity, prev: Infinity, peaked: false }));
+}
+
+/* ---------- 发射 / 弃船 / 死亡 ---------- */
+function launchShip(W, silent) {
+  const L = W.level, sp = L.launch.speed, a = L.launch.angleDeg * RAD;
+  W.ship = { x: L.start.x, y: L.start.y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp };
+  W.v0 = sp;
+  W._slung = false;
+  W.strokes++;
+  W.strokeIgnite = false;
+  W.flightT = 0;
+  W.nearMissMin = Infinity;
+  const bh = W.bh;
+  bh.fuel = 1; bh.everEmpty = false; bh.eatSteps = 0; bh.ignite = false;
+  if (!bh.wake) { bh.wake = true; bh.wakeT = 0; }
+  resetGraze(W);
+  W.phase = 'flight'; W.phaseT = 0;
+  if (!silent) W.events.push({ t: 'launch', speed: sp, x: W.ship.x, y: W.ship.y });
+}
+
+function scuttle(W) {
+  if (W.phase !== 'flight') return false;
+  W.deadCause = { type: 'scuttle', x: W.ship.x, y: W.ship.y };
+  W.ship = null;
+  W.phase = 'lost'; W.phaseT = 0;
+  W.lostDur = CFG.SCUTTLE_DISSOLVE + CFG.SCUTTLE_CHARGE;
+  W.events.push({ t: 'scuttle', x: W.deadCause.x, y: W.deadCause.y });
+  return true;
+}
+
+function die(W, cause) {
+  W.deadCause = cause;
+  if (W.ship) { cause.x = W.ship.x; cause.y = W.ship.y; }
+  W.ship = null;
+  W.phase = 'lost'; W.phaseT = 0; W.lostDur = CFG.LOST_T;
+  W.events.push({ t: 'dead', cause: cause.type, body: cause.body, x: cause.x, y: cause.y, nearMiss: W.nearMissMin });
+}
+
+/* ---------- 单步推进（1/120s，确定性） ---------- */
+function advance(W, inp) {
+  const bh = W.bh;
+  W.t += CFG.DT;
+
+  // 黑洞光标阻尼跟随（每步采样一次输入；非有限输入保持旧目标）
+  const f = 1 - Math.exp(-CFG.K * CFG.DT);
+  if (isFinite(inp.tx) && isFinite(inp.ty)) { bh.tx = inp.tx; bh.ty = inp.ty; }
+  bh.x += (bh.tx - bh.x) * f;
+  bh.y += (bh.ty - bh.y) * f;
+  bh.hold = !!inp.hold;
+
+  // rails 前进（充能期照常推进，§4.1 t=关卡内物理时间）
+  for (const b of W.bodies) railStep(b);
+
+  if (W.phase === 'charge') {
+    W.phaseT += CFG.DT;
+    if (W.phaseT >= W.chargeDur) launchShip(W);
+  } else if (W.phase === 'flight') {
+    stepFlight(W, inp);
+  } else if (W.phase === 'lost') {
+    W.phaseT += CFG.DT;
+    if (inp.skip && W.phaseT >= CFG.SKIP_AFTER) W.phaseT = W.lostDur;
+    if (W.phaseT >= W.lostDur) { W.phase = 'charge'; W.phaseT = 0; W.chargeDur = CFG.QUICK; }
+  }
+}
+
+function stepFlight(W, inp) {
+  const s = W.ship, bh = W.bh, ev = W.events;
+
+  // 唤醒斜坡
+  if (bh.wake && bh.wakeT < CFG.WAKE_T) bh.wakeT = Math.min(CFG.WAKE_T, bh.wakeT + CFG.DT);
+
+  // 燃料经济（§2.3）
+  const canIgnite = bh.wake && !W.noIgniteMode && bh.fuel > 0 && (!bh.everEmpty || bh.fuel >= CFG.FUEL_GATE);
+  const igniting = !!inp.hold && canIgnite;
+  if (igniting) {
+    if (!bh.ignite) ev.push({ t: 'igniteOn' });
+    bh.fuel -= CFG.DT / W.fuelMode;
+    if (bh.fuel <= 0) { bh.fuel = 0; bh.everEmpty = true; ev.push({ t: 'fuelEmpty' }); }
+    if (!W.strokeIgnite || !W.levelIgnited) { W.strokeIgnite = true; W.levelIgnited = true; }
+  } else {
+    if (bh.ignite) ev.push({ t: 'igniteOff' });
+    if (bh.fuel < 1) {
+      const was = bh.fuel;
+      bh.fuel = Math.min(1, bh.fuel + CFG.DT * CFG.FUEL_REGEN);
+      if (was < 1 && bh.fuel >= 1) ev.push({ t: 'fuelFull' });
+    }
+  }
+  bh.ignite = igniting;
+
+  const ramp = bh.wake ? Math.min(1, bh.wakeT / CFG.WAKE_T) : 0;
+  const muBH = ramp * CFG.BH_MU * (igniting ? CFG.IGNITE : 1);
+
+  // 分档子步（状态纯函数）
+  let nd = 1e18;
+  for (const b of W.bodies) {
+    const dx = b.x - s.x, dy = b.y - s.y, d2 = dx * dx + dy * dy;
+    if (d2 < nd) nd = d2;
+  }
+  nd = Math.sqrt(nd);
+  const n = nd > 160 ? 1 : nd > 80 ? 2 : nd > 40 ? 4 : 8;
+  const h = CFG.DT / n;
+  const eps2 = CFG.EPS * CFG.EPS;
+  const bs = W.bodies, nb = bs.length;
+  const tg = W.target;
+
+  for (let k = 0; k < n; k++) {
+    // 引力和（按下标序，确定性）
+    let ax = 0, ay = 0;
+    for (let i = 0; i < nb; i++) {
+      const b = bs[i];
+      const dx = b.x - s.x, dy = b.y - s.y;
+      const d2 = dx * dx + dy * dy, d = Math.sqrt(d2);
+      const inv = d > 0 ? b.mu / (d * (d2 + eps2)) : 0;
+      ax += dx * inv; ay += dy * inv;
+    }
+    {
+      const dx = bh.x - s.x, dy = bh.y - s.y;
+      const d2 = dx * dx + dy * dy, d = Math.sqrt(d2);
+      const inv = d > 0 ? muBH / (d * (d2 + eps2)) : 0;
+      ax += dx * inv; ay += dy * inv;
+    }
+    // 半隐式欧拉：先 v 后 x
+    s.vx += ax * h; s.vy += ay * h;
+    const sp = Math.sqrt(s.vx * s.vx + s.vy * s.vy);
+    if (sp > CFG.VMAX) { const sc = CFG.VMAX / sp; s.vx *= sc; s.vy *= sc; }
+    s.x += s.vx * h; s.y += s.vy * h;
+
+    // 交付
+    {
+      const dx = tg.x - s.x, dy = tg.y - s.y;
+      const dT = Math.sqrt(dx * dx + dy * dy);
+      if (dT < W.nearMissMin) W.nearMissMin = dT;
+      if (dT < tg.r) {
+        W.phase = 'done'; W.doneAt = W.t;
+        W.events.push({ t: 'deliver', x: s.x, y: s.y });
+        return;
+      }
+    }
+    // 天体碰撞 + 掠过
+    for (let i = 0; i < nb; i++) {
+      const b = bs[i];
+      const dx = b.x - s.x, dy = b.y - s.y;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      const g = W.graze[i];
+      const surf = d - b.r;
+      if (d < b.r + CFG.SHIP_R) { die(W, { type: b.type === 'blackhole' ? 'eatenTerrain' : 'crash', body: i }); return; }
+      if (g.prev > b.r + CFG.GRAZE.g3 && d <= b.r + CFG.GRAZE.g3) ev.push({ t: 'grazeEnter', body: i, tier: 3, x: s.x, y: s.y });
+      else if (g.prev > b.r + CFG.GRAZE.g2 && d <= b.r + CFG.GRAZE.g2) ev.push({ t: 'grazeEnter', body: i, tier: 2, x: s.x, y: s.y });
+      if (d < g.min) g.min = d;
+      else if (!g.peaked && g.min < 1e17 && d > g.min + 2) {
+        g.peaked = true;
+        ev.push({ t: 'grazeTier', body: i, tier: grazeTierOf(b, g.min) });
+      }
+      g.prev = d;
+      void surf;
+    }
+    // 出界
+    if (s.x < CFG.OOB.x0 || s.x > CFG.OOB.x1 || s.y < CFG.OOB.y0 || s.y > CFG.OOB.y1) {
+      die(W, { type: 'oob' }); return;
+    }
+  }
+
+  // 玩家黑洞吞没：每 advance 判一次（14 步 = 0.1167s 恒定，不随子步档位漂移）
+  {
+    const dx = bh.x - s.x, dy = bh.y - s.y;
+    const dBH = Math.sqrt(dx * dx + dy * dy);
+    if (dBH < CFG.BH_EAT) {
+      bh.eatSteps++;
+      if (bh.eatSteps >= CFG.EAT_STEPS && !W.disableSwallow) { die(W, { type: 'eatenSelf' }); return; }
+    } else bh.eatSteps = 0;
+  }
+
+  // 引力弹弓高光（§9 条目 14）：3R 内速率增益 > 1.3× 只报一次
+  if (!W._slung) {
+    const sp2 = Math.sqrt(s.vx * s.vx + s.vy * s.vy);
+    if (sp2 > W.v0 * 1.3) {
+      W._slung = true;
+      ev.push({ t: 'slingshot', x: s.x, y: s.y, ratio: sp2 / W.v0 });
+    }
+  }
+
+  W.flightT += CFG.DT;
+  if (W.flightT >= CFG.TIMEOUT) { die(W, { type: 'timeout' }); }
+}
+
+function grazeTierOf(b, minD) {
+  if (minD < b.r + CFG.GRAZE.g3) return 3;
+  if (minD < b.r + CFG.GRAZE.g2) return 2;
+  if (minD < b.r + CFG.GRAZE.g1) return 1;
+  return 0;
+}
+
+/* ---------- 克隆与预测（§2.2 裁决 30：光标冻结约定） ---------- */
+function cloneWorld(W) {
+  const C = {
+    id: W.id, level: W.level,
+    t: W.t, phase: W.phase, phaseT: W.phaseT,
+    chargeDur: W.chargeDur, lostDur: W.lostDur,
+    strokes: W.strokes, levelIgnited: W.levelIgnited, strokeIgnite: W.strokeIgnite,
+    flightT: W.flightT, deadCause: null,
+    nearMissMin: W.nearMissMin,
+    fuelMode: W.fuelMode, noIgniteMode: W.noIgniteMode, disableSwallow: W.disableSwallow,
+    target: W.target,
+    ship: null, v0: W.v0, _slung: W._slung, bh: null, bodies: [], graze: [], events: [],
+  };
+  if (W.ship) C.ship = { x: W.ship.x, y: W.ship.y, vx: W.ship.vx, vy: W.ship.vy };
+  const bh = W.bh;
+  C.bh = {
+    x: bh.x, y: bh.y, tx: bh.tx, ty: bh.ty, fuel: bh.fuel,
+    ignite: bh.ignite, hold: bh.hold, wake: bh.wake, wakeT: bh.wakeT,
+    eatSteps: bh.eatSteps, everEmpty: bh.everEmpty,
+  };
+  for (const b of W.bodies) {
+    const c = { x: b.x, y: b.y, mass: b.mass, r: b.r, type: b.type, hue: b.hue, movement: b.movement, mu: b.mu, _rail: null };
+    if (b._rail) {
+      const r = b._rail;
+      c._rail = r.kind === 'orbit'
+        ? { kind: 'orbit', cx: r.cx, cy: r.cy, R: r.R, ca: r.ca, sa: r.sa, cd: r.cd, sd: r.sd }
+        : { kind: 'line', ax: r.ax, ay: r.ay, bx: r.bx, by: r.by, ph: r.ph, dph: r.dph };
+    }
+    C.bodies.push(c);
+  }
+  for (const g of W.graze) C.graze.push({ min: g.min, prev: g.prev, peaked: g.peaked });
+  return C;
+}
+
+/* 预测推演：克隆全状态、420 步（3.5s）、每 4 步采点 */
+function predictPath(W, hold, steps, sampleEvery) {
+  steps = steps || 420; sampleEvery = sampleEvery || 4;
+  const C = cloneWorld(W);
+  if (C.phase === 'charge') {
+    // 充能期：直接按发射矢量起算（黑洞按唤醒斜坡建模）
+    const L = C.level, sp = L.launch.speed, a = L.launch.angleDeg * RAD;
+    C.ship = { x: L.start.x, y: L.start.y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp };
+    C.bh.wake = true; C.bh.wakeT = 0;
+    C.phase = 'flight';
+  }
+  const inp = { tx: C.bh.tx, ty: C.bh.ty, hold: !!hold, skip: false };
+  const pts = [];
+  let end = 'fly', endT = 0;
+  for (let i = 0; i < steps; i++) {
+    advance(C, inp);
+    if (i % sampleEvery === 0 && C.ship) pts.push({ x: C.ship.x, y: C.ship.y });
+    if (C.phase === 'done') { end = 'deliver'; endT = (i + 1) * CFG.DT; break; }
+    if (C.phase === 'lost') { end = 'dead'; endT = (i + 1) * CFG.DT; break; }
+  }
+  return { pts, end, endT };
+}
+
+/* ---------- 计分（§2.6） ---------- */
+function computeGrazePts(W) {
+  // 仅交付杆调用：每天体最高档一次
+  let total = 0; const per = [];
+  for (let i = 0; i < W.bodies.length; i++) {
+    const tier = grazeTierOf(W.bodies[i], W.graze[i].min);
+    const pts = tier === 3 ? CFG.GRAZE.p3 : tier === 2 ? CFG.GRAZE.p2 : tier === 1 ? CFG.GRAZE.p1 : 0;
+    if (pts > 0) per.push({ body: i, tier, pts });
+    total += pts;
+  }
+  return { total, per };
+}
+
+function scoreParts(strokes, par, grazePts, noIgnite, timeOk) {
+  const base = 1000;
+  const save = 400 * Math.max(0, par - strokes);
+  const zero = noIgnite ? 500 : 0;
+  const timeB = timeOk ? 300 : 0;
+  const total = base + save + grazePts + zero + timeB;
+  let rating = 'B';
+  if (total >= 1400) rating = 'A';
+  if (total >= 1800 && noIgnite) rating = 'S';
+  return { base, save, graze: grazePts, zero, time: timeB, total, rating };
+}
+
+/* ---------- 关卡契约校验（§4.1/§4.2） ---------- */
+function validateLevel(L) {
+  const errs = [], warns = [];
+  const fatal = (m) => errs.push(m);
+  if (!(L.chapter >= 1 && L.chapter <= 5)) fatal('chapter 域');
+  if (!/^c[1-5]-l[1-6]$/.test(L.id || '')) fatal('id 格式');
+  if (!(L.par >= 1 && L.par <= 9)) fatal('par 域');
+  const inW = (p) => p && p.x >= 0 && p.x <= 1600 && p.y >= 0 && p.y <= 900;
+  if (!inW(L.start)) fatal('start 界外');
+  if (!inW(L.target) || !(L.target.r >= 14 && L.target.r <= 60)) fatal('target 域');
+  if (!Array.isArray(L.bodies) || L.bodies.length < 1 || L.bodies.length > 6) fatal('bodies 数量');
+  for (const b of L.bodies || []) {
+    if (!(b.x >= -200 && b.x <= 1800 && b.y >= -200 && b.y <= 1100)) fatal('天体坐标域');
+    if (!(b.mass > 0 && b.r > 0)) fatal('mass/r 域');
+    if (['planet', 'moon', 'star', 'blackhole', 'repulsor'].indexOf(b.type) < 0) fatal('type 枚举');
+    if (!(b.hue >= 0 && b.hue <= 360)) fatal('hue 域');
+    if (b.movement) {
+      const m = b.movement;
+      if (m.kind === 'orbit') {
+        if (!(m.radius > 0 && m.periodSec > 0)) fatal('orbit movement 域');
+        const a = m.phaseDeg * RAD;
+        const px = m.cx + m.radius * Math.cos(a), py = m.cy + m.radius * Math.sin(a);
+        if (Math.hypot(px - b.x, py - b.y) > 2) fatal('orbit t=0 位置与静态坐标不符 (>2px)');
+      } else if (m.kind === 'line') {
+        if (!(m.periodSec > 0)) fatal('line movement 域');
+        const u = (1 - Math.cos(m.phaseDeg * RAD)) / 2;
+        const px = m.ax + (m.bx - m.ax) * u, py = m.ay + (m.by - m.ay) * u;
+        if (Math.hypot(px - b.x, py - b.y) > 2) fatal('line t=0 位置与静态坐标不符 (>2px)');
+      } else fatal('movement.kind');
+    }
+  }
+  if (!L.launch || !(L.launch.speed >= 180 && L.launch.speed <= 360)) fatal('launch.speed 域');
+  // parTime 复算（不一致仅警告——数据侧已由 node 校验过）
+  const d = Math.hypot(L.target.x - L.start.x, L.target.y - L.start.y);
+  const pt = Math.ceil(1.2 * d / L.launch.speed + 3 + 1.5 * (L.par - 1));
+  if (L.parTime !== pt) warns.push('parTime=' + L.parTime + ' 与公式复算 ' + pt + ' 不一致');
+  return { errs, warns, parTime: pt };
+}
+
+/* ---------- Node 导出（模拟器共用；浏览器忽略） ---------- */
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    CFG, TAU, RAD, clamp, mulberry32, muOf, parkOf,
+    makeWorld, advance, launchShip, scuttle, cloneWorld, predictPath,
+    computeGrazePts, scoreParts, grazeTierOf, validateLevel,
+  };
+}
+
+
+/* ============================================================
+ * 牵星 QIANXING · 02_data.js
+ * 30 关数据（5 章 × 6 关）—— 与 game-studio/levels/ch*.json 同源
+ * ============================================================ */
+'use strict';
+
+const CHAPTERS_META = [
+  { n: 1, name: '牵星初航', sub: '你就是引力' },
+  { n: 2, name: '碎月弹弓', sub: '微调与加速' },
+  { n: 3, name: '斥力海峡', sub: '反向力' },
+  { n: 4, name: '视界之舞', sub: '危险的极致引力' },
+  { n: 5, name: '动星牵航', sub: '万物皆动' },
+];
+
+const LEVELS = [
+  { chapter: 1, levels: [
+    { id: 'c1-l1', name: '一线之牵', par: 1,
+      start: { x: 140, y: 450 }, target: { x: 1450, y: 450, r: 48 },
+      bodies: [ { x: 700, y: 330, mass: 60, r: 12, type: 'moon', hue: 215, movement: null } ],
+      hint: '移动光标，把小黑洞放到船前方——引力会替你掌舵。',
+      launch: { speed: 240, angleDeg: 0 }, parTime: 10 },
+    { id: 'c1-l2', name: '绕过烈阳', par: 2,
+      start: { x: 180, y: 450 }, target: { x: 1420, y: 450, r: 40 },
+      bodies: [ { x: 800, y: 450, mass: 3000, r: 48, type: 'star', hue: 35, movement: null } ],
+      hint: '它不是墙，是弯道——从下侧擦过去。',
+      launch: { speed: 260, angleDeg: 0 }, parTime: 11 },
+    { id: 'c1-l3', name: '点火试炼', par: 2,
+      start: { x: 170, y: 640 }, target: { x: 720, y: 150, r: 28 },
+      bodies: [ { x: 760, y: 430, mass: 900, r: 24, type: 'planet', hue: 205, movement: null } ],
+      hint: '行星会把你甩向上方——回钩急弯时按住点火，引力翻倍。',
+      launch: { speed: 250, angleDeg: 0 }, parTime: 9 },
+    { id: 'c1-l4', name: '琥珀回廊', par: 2,
+      start: { x: 140, y: 480 }, target: { x: 1460, y: 420, r: 30 },
+      bodies: [
+        { x: 650, y: 190, mass: 900, r: 24, type: 'planet', hue: 205, movement: null },
+        { x: 1050, y: 710, mass: 900, r: 24, type: 'planet', hue: 30, movement: null } ],
+      hint: '两颗行星轮流拽船——顺着弯走，贴得越近分越多。',
+      launch: { speed: 250, angleDeg: 0 }, parTime: 11 },
+    { id: 'c1-l5', name: '双珠回旋', par: 3,
+      start: { x: 150, y: 450 }, target: { x: 1450, y: 450, r: 26 },
+      bodies: [
+        { x: 600, y: 390, mass: 900, r: 24, type: 'planet', hue: 205, movement: null },
+        { x: 1020, y: 520, mass: 900, r: 24, type: 'planet', hue: 30, movement: null } ],
+      hint: '两颗珠子压在航线上——先扬过头顶，再借下珠兜回来。',
+      launch: { speed: 250, angleDeg: 0 }, parTime: 13 },
+    { id: 'c1-l6', name: '烈阳回廊', par: 3,
+      start: { x: 150, y: 500 }, target: { x: 1430, y: 180, r: 24 },
+      bodies: [
+        { x: 1050, y: 300, mass: 3000, r: 48, type: 'star', hue: 35, movement: null },
+        { x: 1050, y: 640, mass: 3000, r: 48, type: 'star', hue: 35, movement: null } ],
+      hint: '双日夹缝只容一线——贴着日面绕上去，险者多得。',
+      launch: { speed: 250, angleDeg: 0 }, parTime: 13 },
+  ]},
+  { chapter: 2, levels: [
+    { id: 'c2-l1', name: '细线穿针', par: 2,
+      start: { x: 170, y: 600 }, target: { x: 1400, y: 320, r: 36 },
+      bodies: [
+        { x: 728, y: 530, mass: 900, r: 24, type: 'planet', hue: 205, movement: null },
+        { x: 770, y: 700, mass: 60, r: 12, type: 'moon', hue: 215, movement: null },
+        { x: 1270, y: 355, mass: 60, r: 12, type: 'moon', hue: 215, movement: null },
+        { x: 1310, y: 380, mass: 60, r: 12, type: 'moon', hue: 215, movement: null } ],
+      hint: '行星把细线拱成弯月——黑洞负责微调，末段从双月上方一并掠过。',
+      launch: { speed: 260, angleDeg: 10 }, parTime: 11 },
+    { id: 'c2-l2', name: '月桥', par: 2,
+      start: { x: 180, y: 780 }, target: { x: 1350, y: 531, r: 36 },
+      bodies: [
+        { x: 400, y: 770, mass: 60, r: 12, type: 'moon', hue: 215, movement: null },
+        { x: 600, y: 700, mass: 60, r: 12, type: 'moon', hue: 215, movement: null },
+        { x: 800, y: 630, mass: 60, r: 12, type: 'moon', hue: 215, movement: null },
+        { x: 1000, y: 615, mass: 60, r: 12, type: 'moon', hue: 215, movement: null } ],
+      hint: '四颗月是桥墩——借黑洞甩过拱顶，沿桥面滑进虫洞。',
+      launch: { speed: 260, angleDeg: -25 }, parTime: 11 },
+    { id: 'c2-l3', name: '双月交替', par: 3,
+      start: { x: 150, y: 450 }, target: { x: 1400, y: 570, r: 36 },
+      bodies: [
+        { x: 545, y: 510, mass: 60, r: 12, type: 'moon', hue: 215, movement: null },
+        { x: 760, y: 410, mass: 60, r: 12, type: 'moon', hue: 215, movement: null } ],
+      hint: '第一颗月贴脸掠过才值钱——擦身 250 分，交替穿行。',
+      launch: { speed: 270, angleDeg: 5 }, parTime: 12 },
+    { id: 'c2-l4', name: '牵星逐月', par: 3,
+      start: { x: 150, y: 640 }, target: { x: 1300, y: 270, r: 28 },
+      bodies: [
+        { x: 434, y: 620, mass: 60, r: 12, type: 'moon', hue: 215, movement: null },
+        { x: 700, y: 460, mass: 60, r: 12, type: 'moon', hue: 215, movement: null },
+        { x: 1050, y: 390, mass: 60, r: 12, type: 'moon', hue: 215, movement: null } ],
+      hint: '把黑洞吊在船头——先刹车、后转向，速度条会替你回答。',
+      launch: { speed: 260, angleDeg: -15 }, parTime: 12 },
+    { id: 'c2-l5', name: '月群迷阵', par: 4,
+      start: { x: 140, y: 300 }, target: { x: 1470, y: 320, r: 26 },
+      bodies: [
+        { x: 760, y: 580, mass: 1500, r: 44, type: 'star', hue: 35,
+          movement: { kind: 'orbit', cx: 760, cy: 470, radius: 110, periodSec: 7, phaseDeg: 90 } },
+        { x: 760, y: 360, mass: 1500, r: 44, type: 'star', hue: 35,
+          movement: { kind: 'orbit', cx: 760, cy: 470, radius: 110, periodSec: 7, phaseDeg: 270 } },
+        { x: 420, y: 120, mass: 60, r: 12, type: 'moon', hue: 215, movement: null },
+        { x: 1146, y: 230, mass: 60, r: 12, type: 'moon', hue: 215, movement: null },
+        { x: 250, y: 170, mass: 60, r: 12, type: 'moon', hue: 215, movement: null } ],
+      hint: '双星在转——看准相位贴着它们头顶甩过去，落下时擦过守门的月。',
+      launch: { speed: 270, angleDeg: -20 }, parTime: 14 },
+    { id: 'c2-l6', name: '三连月弦', par: 4,
+      start: { x: 150, y: 760 }, target: { x: 1450, y: 160, r: 30 },
+      bodies: [
+        { x: 450, y: 640, mass: 60, r: 12, type: 'moon', hue: 215, movement: null },
+        { x: 760, y: 540, mass: 60, r: 12, type: 'moon', hue: 215, movement: null },
+        { x: 1080, y: 340, mass: 60, r: 12, type: 'moon', hue: 215, movement: null } ],
+      hint: '擦着每张月面过——千钧一发出 500 分。',
+      launch: { speed: 280, angleDeg: -27 }, parTime: 14 },
+  ]},
+  { chapter: 3, levels: [
+    { id: 'c3-l1', name: '逆风', par: 2,
+      start: { x: 150, y: 450 }, target: { x: 1430, y: 450, r: 38 },
+      bodies: [ { x: 770, y: 310, mass: 900, r: 28, type: 'repulsor', hue: 330, movement: null } ],
+      hint: '斥力星是顶头逆风——它会把你压向下风处，把黑洞挂在高处把船拽回来。',
+      launch: { speed: 260, angleDeg: 0 }, parTime: 11 },
+    { id: 'c3-l2', name: '隙缝', par: 3,
+      start: { x: 150, y: 680 }, target: { x: 1400, y: 780, r: 26 },
+      bodies: [
+        { x: 700, y: 240, mass: 900, r: 28, type: 'repulsor', hue: 330, movement: null },
+        { x: 700, y: 380, mass: 60, r: 12, type: 'moon', hue: 215, movement: null },
+        { x: 700, y: 520, mass: 900, r: 28, type: 'repulsor', hue: 330, movement: null },
+        { x: 700, y: 800, mass: 900, r: 28, type: 'repulsor', hue: 330, movement: null } ],
+      hint: '三颗斥力星封成墙，缝里悬着一颗月——贴着月面钻过缝，再压杆下潜。',
+      launch: { speed: 280, angleDeg: -28 }, parTime: 12 },
+    { id: 'c3-l3', name: '夹缝求存', par: 3,
+      start: { x: 150, y: 450 }, target: { x: 1260, y: 180, r: 24 },
+      bodies: [
+        { x: 850, y: 430, mass: 1200, r: 22, type: 'blackhole', hue: 350, movement: null },
+        { x: 620, y: 150, mass: 900, r: 28, type: 'repulsor', hue: 330, movement: null } ],
+      hint: '斥力星压顶，把你灌向视界——贴着视界下缘借引力甩尾，从夹缝里仰身脱出。',
+      launch: { speed: 270, angleDeg: 0 }, parTime: 12 },
+    { id: 'c3-l4', name: '斥力漏斗', par: 3,
+      start: { x: 150, y: 450 }, target: { x: 1450, y: 450, r: 28 },
+      bodies: [
+        { x: 700, y: 220, mass: 900, r: 28, type: 'repulsor', hue: 330, movement: null },
+        { x: 700, y: 680, mass: 900, r: 28, type: 'repulsor', hue: 330, movement: null },
+        { x: 1000, y: 450, mass: 900, r: 24, type: 'planet', hue: 205, movement: null } ],
+      hint: '漏斗会把你灌向那颗珠子——提前歪一手。',
+      launch: { speed: 280, angleDeg: 0 }, parTime: 12 },
+    { id: 'c3-l5', name: '逆浪', par: 4,
+      start: { x: 150, y: 450 }, target: { x: 1080, y: 190, r: 28 },
+      bodies: [
+        { x: 520, y: 250, mass: 900, r: 28, type: 'repulsor', hue: 330, movement: null },
+        { x: 850, y: 450, mass: 1200, r: 22, type: 'blackhole', hue: 350, movement: null },
+        { x: 990, y: 430, mass: 60, r: 12, type: 'moon', hue: 215, movement: null },
+        { x: 1150, y: 300, mass: 900, r: 28, type: 'repulsor', hue: 330, movement: null } ],
+      hint: '第一记浪把你压进谷底，贴着视界甩尾上仰——月与斥力星守在收杆路上。',
+      launch: { speed: 280, angleDeg: 0 }, parTime: 12 },
+    { id: 'c3-l6', name: '斥力弹弓', par: 4,
+      start: { x: 150, y: 780 }, target: { x: 1300, y: 700, r: 24 },
+      bodies: [
+        { x: 500, y: 750, mass: 900, r: 28, type: 'repulsor', hue: 330, movement: null },
+        { x: 780, y: 380, mass: 1200, r: 22, type: 'blackhole', hue: 350, movement: null },
+        { x: 1000, y: 500, mass: 60, r: 12, type: 'moon', hue: 215, movement: null } ],
+      hint: '借斥力星上膛爬升，从视界上方一甩——俯冲收进虫洞，别蹭到那颗月。',
+      launch: { speed: 280, angleDeg: -35 }, parTime: 13 },
+  ]},
+  { chapter: 4, levels: [
+    { id: 'c4-l1', name: '深潭', par: 2,
+      start: { x: 150, y: 450 }, target: { x: 1420, y: 450, r: 38 },
+      bodies: [ { x: 760, y: 520, mass: 1200, r: 22, type: 'blackhole', hue: 350, movement: null } ],
+      hint: '黑洞是深潭不是墙——从潭肩掠过借力转弯，贴得太近就上不来了。',
+      launch: { speed: 280, angleDeg: -30 }, parTime: 10 },
+    { id: 'c4-l2', name: '视界擦舞', par: 2,
+      start: { x: 180, y: 450 }, target: { x: 1420, y: 450, r: 30 },
+      bodies: [ { x: 760, y: 450, mass: 1200, r: 22, type: 'blackhole', hue: 350, movement: null } ],
+      hint: '离视界 40px 擦身而过——再近 12px 就没了。',
+      launch: { speed: 280, angleDeg: 0 }, parTime: 10 },
+    { id: 'c4-l3', name: '双子渊', par: 3,
+      start: { x: 150, y: 450 }, target: { x: 1440, y: 480, r: 26 },
+      bodies: [
+        { x: 620, y: 450, mass: 1200, r: 22, type: 'blackhole', hue: 350, movement: null },
+        { x: 1100, y: 450, mass: 1200, r: 22, type: 'blackhole', hue: 350, movement: null } ],
+      hint: '两潭连成的鞍部最窄——先翻左潭肩，再潜右潭底，中间别恋战。',
+      launch: { speed: 280, angleDeg: 0 }, parTime: 12 },
+    { id: 'c4-l4', name: '拔河', par: 4,
+      start: { x: 150, y: 450 }, target: { x: 1440, y: 200, r: 22 },
+      bodies: [
+        { x: 600, y: 280, mass: 3000, r: 48, type: 'star', hue: 35, movement: null },
+        { x: 1000, y: 620, mass: 1200, r: 22, type: 'blackhole', hue: 350, movement: null } ],
+      hint: '日在上、渊在下，两头都在拽你——被日甩进渊的轨道里绕半圈，再松手入洞。',
+      launch: { speed: 290, angleDeg: -10 }, parTime: 13 },
+    { id: 'c4-l5', name: '渊群', par: 4,
+      start: { x: 150, y: 450 }, target: { x: 1440, y: 450, r: 24 },
+      bodies: [
+        { x: 480, y: 450, mass: 1200, r: 22, type: 'blackhole', hue: 350, movement: null },
+        { x: 820, y: 450, mass: 1200, r: 22, type: 'blackhole', hue: 350, movement: null },
+        { x: 1160, y: 450, mass: 1200, r: 22, type: 'blackhole', hue: 350, movement: null } ],
+      hint: '三潭一字排开：翻潭、潜潭、再翻潭——中潭头皮下那记擦身最值钱。',
+      launch: { speed: 280, angleDeg: -8 }, parTime: 14 },
+    { id: 'c4-l6', name: '渊上漫步', par: 5,
+      start: { x: 150, y: 450 }, target: { x: 1440, y: 660, r: 20 },
+      bodies: [
+        { x: 620, y: 455, mass: 3000, r: 48, type: 'star', hue: 35, movement: null },
+        { x: 1060, y: 300, mass: 1200, r: 22, type: 'blackhole', hue: 350, movement: null } ],
+      hint: '先潜到日井底下借力抬头，再贴着视界头皮漫步——最后松手，坠进杯口。',
+      launch: { speed: 290, angleDeg: 20 }, parTime: 15 },
+  ]},
+  { chapter: 5, levels: [
+    { id: 'c5-l1', name: '公转月台', par: 2,
+      start: { x: 150, y: 450 }, target: { x: 1450, y: 450, r: 32 },
+      bodies: [
+        { x: 800, y: 460, mass: 900, r: 24, type: 'planet', hue: 205, movement: null },
+        { x: 800, y: 320, mass: 60, r: 12, type: 'moon', hue: 215,
+          movement: { kind: 'orbit', cx: 800, cy: 460, radius: 140, periodSec: 9, phaseDeg: 270 } } ],
+      hint: '先读月台相位——趁它荡向右侧时从顶上越过。',
+      launch: { speed: 280, angleDeg: -8 }, parTime: 11 },
+    { id: 'c5-l2', name: '穿梭光梭', par: 2,
+      start: { x: 150, y: 450 }, target: { x: 1450, y: 450, r: 30 },
+      bodies: [
+        { x: 500, y: 160, mass: 900, r: 24, type: 'planet', hue: 205, movement: null },
+        { x: 1100, y: 740, mass: 900, r: 24, type: 'planet', hue: 205, movement: null },
+        { x: 800, y: 150, mass: 900, r: 24, type: 'planet', hue: 205,
+          movement: { kind: 'line', ax: 800, ay: 150, bx: 800, by: 750, periodSec: 8, phaseDeg: 0 } } ],
+      hint: '光梭在两端最慢——卡住它换向的半拍再穿缝。',
+      launch: { speed: 280, angleDeg: 0 }, parTime: 11 },
+    { id: 'c5-l3', name: '对转双星', par: 3,
+      start: { x: 150, y: 450 }, target: { x: 1450, y: 450, r: 28 },
+      bodies: [
+        { x: 800, y: 470, mass: 900, r: 18, type: 'planet', hue: 205, movement: null },
+        { x: 800, y: 710, mass: 900, r: 24, type: 'planet', hue: 205,
+          movement: { kind: 'orbit', cx: 800, cy: 450, radius: 260, periodSec: 14, phaseDeg: 90 } },
+        { x: 800, y: 190, mass: 900, r: 24, type: 'planet', hue: 205,
+          movement: { kind: 'orbit', cx: 800, cy: 450, radius: 260, periodSec: 14, phaseDeg: 270 } } ],
+      hint: '双星永远隔着一条直径——从它们张开的半圆里穿过去。',
+      launch: { speed: 280, angleDeg: -10 }, parTime: 12 },
+    { id: 'c5-l4', name: '巡日', par: 4,
+      start: { x: 140, y: 780 }, target: { x: 1460, y: 160, r: 26 },
+      bodies: [
+        { x: 490, y: 460, mass: 3000, r: 48, type: 'star', hue: 35,
+          movement: { kind: 'orbit', cx: 780, cy: 460, radius: 290, periodSec: 22, phaseDeg: 180 } },
+        { x: 1120, y: 220, mass: 900, r: 24, type: 'planet', hue: 205, movement: null },
+        { x: 1330, y: 40, mass: 900, r: 28, type: 'repulsor', hue: 330, movement: null } ],
+      hint: '巡日 22 秒一圈——趁它还在左弧时穿环，别迎它下行的右弧。',
+      launch: { speed: 300, angleDeg: -14 }, parTime: 14 },
+    { id: 'c5-l5', name: '全动走廊', par: 4,
+      start: { x: 150, y: 450 }, target: { x: 1450, y: 450, r: 24 },
+      bodies: [
+        { x: 800, y: 750, mass: 1200, r: 22, type: 'blackhole', hue: 350,
+          movement: { kind: 'orbit', cx: 800, cy: 450, radius: 300, periodSec: 26, phaseDeg: 90 } },
+        { x: 800, y: 150, mass: 1200, r: 22, type: 'blackhole', hue: 350,
+          movement: { kind: 'orbit', cx: 800, cy: 450, radius: 300, periodSec: 26, phaseDeg: 270 } },
+        { x: 1210, y: 350, mass: 60, r: 12, type: 'moon', hue: 215,
+          movement: { kind: 'orbit', cx: 1300, cy: 350, radius: 90, periodSec: 8, phaseDeg: 180 } } ],
+      hint: '走廊跟着双渊转——渊口张开的几秒就是门，慢了就等下一圈。',
+      launch: { speed: 300, angleDeg: 0 }, parTime: 13 },
+    { id: 'c5-l6', name: '牵星大合流', par: 5,
+      start: { x: 140, y: 780 }, target: { x: 1460, y: 140, r: 26 },
+      bodies: [
+        { x: 800, y: 460, mass: 3000, r: 48, type: 'star', hue: 35, movement: null },
+        { x: 523, y: 300, mass: 900, r: 24, type: 'planet', hue: 205,
+          movement: { kind: 'orbit', cx: 800, cy: 460, radius: 320, periodSec: 24, phaseDeg: 210 } },
+        { x: 1077, y: 620, mass: 900, r: 24, type: 'planet', hue: 205,
+          movement: { kind: 'orbit', cx: 800, cy: 460, radius: 320, periodSec: 24, phaseDeg: 30 } },
+        { x: 240, y: 120, mass: 60, r: 12, type: 'moon', hue: 215,
+          movement: { kind: 'line', ax: 240, ay: 120, bx: 1360, by: 120, periodSec: 18, phaseDeg: 0 } } ],
+      hint: '行星对转如双桨——借公切速度弹上去。',
+      launch: { speed: 300, angleDeg: -31 }, parTime: 15 },
+  ]},
+];
+
+const LEVEL_INDEX = {};
+for (const ch of LEVELS) for (const L of ch.levels) { L.chapter = ch.chapter; LEVEL_INDEX[L.id] = L; }
+const LEVEL_ORDER = [];
+for (const ch of LEVELS) for (const L of ch.levels) LEVEL_ORDER.push(L.id);
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { LEVELS, LEVEL_INDEX, LEVEL_ORDER, CHAPTERS_META };
+}
+
+
+/* ============================================================
+ * 牵星 QIANXING · 03_sprites.js
+ * 精灵烘焙（§7.3-7.7）：一切 glow/渐变预烘焙，运行期只 blit
+ * ============================================================ */
+'use strict';
+
+/* ---------- 调色板（§7.1 暗夜蓝金） ---------- */
+const PAL_BASE = {
+  bg0: '#04060d', bg1: '#0a0f1f', bg2: '#18233f',
+  amber: '#ffb454', amberHi: '#ffe9c4', amberLo: '#b3611d',
+  ice: '#8fe3ff', iceMid: '#3fb6e8', iceLo: '#1c6b96',
+  ok: '#8affc1', okHi: '#d8ffe8',
+  danger: '#ff5d7a', dangerHi: '#ffd9e2', dangerLo: '#b3244a',
+  text: '#e8eefc', textDim: '#9aa8c7', textFaint: '#57617f',
+  gold: '#f6e05e',
+};
+const PAL_CB = Object.assign({}, PAL_BASE, {
+  amber: '#E69F00', ice: '#56B4E9', ok: '#009E73', danger: '#D55E00',
+});
+let PAL = PAL_BASE;
+
+function mkCanvas(w, h) {
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.ceil(w)); c.height = Math.max(1, Math.ceil(h));
+  return c;
+}
+function hexRGB(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+function rgba(hex, a) { const c = hexRGB(hex); return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+function mixHex(h1, h2, t) {
+  const a = hexRGB(h1), b = hexRGB(h2);
+  const r = Math.round(a[0] + (b[0] - a[0]) * t), g = Math.round(a[1] + (b[1] - a[1]) * t), bl = Math.round(a[2] + (b[2] - a[2]) * t);
+  return 'rgb(' + r + ',' + g + ',' + bl + ')';
+}
+
+/* ---------- glow 光斑精灵（4 色 × 3 档 + 2 张 256） ---------- */
+const S = {}; // 精灵仓库
+function bakeGlow(colorHex, size) {
+  const c = mkCanvas(size, size), g = c.getContext('2d');
+  const r = size / 2;
+  const grad = g.createRadialGradient(r, r, 0, r, r, r);
+  grad.addColorStop(0, rgba('#ffffff', 0.95));
+  grad.addColorStop(0.18, rgba(colorHex, 0.85));
+  grad.addColorStop(0.45, rgba(colorHex, 0.32));
+  grad.addColorStop(1, rgba(colorHex, 0));
+  g.fillStyle = grad; g.fillRect(0, 0, size, size);
+  return c;
+}
+function bakeGlows() {
+  S.glow = {};
+  for (const name of ['amber', 'ice', 'white', 'danger', 'ok', 'gold']) {
+    const hex = name === 'white' ? '#e8f4ff' : name === 'gold' ? PAL.gold : PAL[name];
+    S.glow[name] = {};
+    for (const sz of [32, 64, 128]) S.glow[name][sz] = bakeGlow(hex, sz);
+  }
+  S.glow.amber[256] = bakeGlow(PAL.amber, 256);
+  S.glow.white[256] = bakeGlow('#e8f4ff', 256);
+}
+
+/* ---------- 玩家黑洞套件（§7.6，R=16） ---------- */
+function bakeBHDisks() {
+  // 吸积盘精灵：径向渐变烘焙，运行期压扁贴出
+  const mk = (inner) => {
+    const c = mkCanvas(128, 128), g = c.getContext('2d');
+    const r0 = 22.4, r1 = 67.2, cx = 64;
+    const grad = g.createRadialGradient(cx, cx, r0, cx, cx, r1);
+    grad.addColorStop(0, inner ? rgba(PAL.amberHi, 0.95) : 'rgba(255,246,232,0.95)');
+    grad.addColorStop(0.3, rgba(PAL.amber, 0.55));
+    grad.addColorStop(1, rgba('#ff9d45', 0));
+    g.fillStyle = grad;
+    g.beginPath(); g.arc(cx, cx, r1, 0, TAU); g.fill();
+    return c;
+  };
+  S.bhDisk = mk(false);
+  S.bhDiskHot = mk(true);
+  // 透镜星环：10-14 颗白/暖亮斑，分布半径 30px
+  const c = mkCanvas(128, 128), g = c.getContext('2d');
+  const rng = mulberry32(777);
+  const n = 12;
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * TAU + rng() * 0.4;
+    const rr = 28 + rng() * 5;
+    const x = 64 + Math.cos(a) * rr, y = 64 + Math.sin(a) * rr;
+    const sz = rng() < 0.3 ? 8 : 6;
+    g.drawImage(S.glow[rng() < 0.4 ? 'white' : 'amber'][32], x - sz / 2, y - sz / 2, sz, sz);
+  }
+  S.lensRing = c;
+  // 吸积粒子池（运行期旋转，极坐标 {a,r,w}）
+  S.bhDust = [];
+  const drng = mulberry32(888);
+  for (let i = 0; i < 24; i++) {
+    const r = 20.8 + drng() * 46;
+    S.bhDust.push({ a: drng() * TAU, r: r, w: 2.2 * Math.pow(30 / r, 1.5) });
+  }
+}
+
+/* ---------- 天体精灵（§7.5 四层配方） ---------- */
+function hueShift(hex, deg) {
+  // 简易 HSL 色相旋转（微调用）
+  const [r, g, b] = hexRGB(hex).map(v => v / 255);
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+  let h = 0, s = 0; const l = (mx + mn) / 2;
+  if (mx !== mn) {
+    const d = mx - mn;
+    s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
+    if (mx === r) h = ((g - b) / d + (g < b ? 6 : 0));
+    else if (mx === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h /= 6;
+  }
+  h = (h + deg / 360 + 1) % 1;
+  const f = (p, q, t) => { if (t < 0) t += 1; if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6; return p; };
+  let r2, g2, b2;
+  if (s === 0) { r2 = g2 = b2 = l; }
+  else {
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
+    r2 = f(p, q, h + 1 / 3); g2 = f(p, q, h); b2 = f(p, q, h - 1 / 3);
+  }
+  return 'rgb(' + Math.round(r2 * 255) + ',' + Math.round(g2 * 255) + ',' + Math.round(b2 * 255) + ')';
+}
+
+const BODY_RAMP = {
+  gas:  { light: '#f0d0a0', base: '#c98a4b', dark: '#5a3418', atmo: '255,180,120' },
+  iceP: { light: '#e8f8ff', base: '#7fb8d8', dark: '#1c3a55', atmo: '140,220,255' },
+  star: { light: '#fff8ec', base: '#ffd2a1', dark: '#b3244a', atmo: '255,93,122' },
+  rep:  { light: '#ffd9e2', base: '#ff5d7a', dark: '#b3244a', atmo: '255,93,122' },
+};
+function bakePlanet(R, ramp, seed, opts) {
+  opts = opts || {};
+  const pad = Math.ceil(R * 0.6) + 4;
+  const size = (R + pad) * 2;
+  const c = mkCanvas(size, size), g = c.getContext('2d');
+  const cx = size / 2, cy = size / 2;
+  const rng = mulberry32(seed);
+  // ① 球体：偏心径向渐变（光源左上 45°）
+  const lx = cx - 0.35 * R, ly = cy - 0.35 * R;
+  let grad = g.createRadialGradient(lx, ly, R * 0.1, cx, cy, R);
+  grad.addColorStop(0, ramp.light);
+  grad.addColorStop(0.55, ramp.base);
+  grad.addColorStop(1, ramp.dark);
+  g.fillStyle = grad;
+  g.beginPath(); g.arc(cx, cy, R, 0, TAU); g.fill();
+  if (R >= 20 || opts.force4) {
+    // ② 纬向条纹（source-atop）
+    g.save();
+    g.beginPath(); g.arc(cx, cy, R, 0, TAU); g.clip();
+    for (let y = cy - R; y < cy + R; y += R * (0.12 + rng() * 0.15)) {
+      g.globalAlpha = 0.08 + rng() * 0.12;
+      g.fillStyle = rng() < 0.5 ? ramp.light : ramp.dark;
+      const h = R * (0.05 + rng() * 0.09);
+      g.fillRect(cx - R, y, R * 2, h);
+    }
+    g.restore();
+    // ③ 晨昏线：右下压暗
+    g.save();
+    g.beginPath(); g.arc(cx, cy, R, 0, TAU); g.clip();
+    const t = g.createLinearGradient(cx - R, cy - R, cx + R, cy + R);
+    t.addColorStop(0, 'rgba(0,0,0,0)');
+    t.addColorStop(0.55, 'rgba(0,0,0,0.15)');
+    t.addColorStop(1, 'rgba(4,6,13,0.78)');
+    g.fillStyle = t; g.fillRect(0, 0, size, size);
+    g.restore();
+  }
+  // ④ 大气边缘光
+  grad = g.createRadialGradient(cx, cy, R * 0.9, cx, cy, R + pad);
+  grad.addColorStop(0, 'rgba(' + ramp.atmo + ',0.4)');
+  grad.addColorStop(0.5, 'rgba(' + ramp.atmo + ',0.12)');
+  grad.addColorStop(1, 'rgba(' + ramp.atmo + ',0)');
+  g.fillStyle = grad;
+  g.beginPath(); g.arc(cx, cy, R + pad, 0, TAU); g.fill();
+  return { c, size, pad };
+}
+
+function bakeStarBody(R, seed) {
+  const base = bakePlanet(R, BODY_RAMP.star, seed, { force4: true });
+  const g = base.c.getContext('2d');
+  const cx = base.size / 2, cy = base.size / 2;
+  const rng = mulberry32(seed ^ 0x5f5f);
+  // 芒刺（危险形状编码，8-12 根）
+  const n = 8 + Math.floor(rng() * 5);
+  g.strokeStyle = rgba(base ? PAL.amberHi : '#fff', 0.4);
+  g.lineWidth = 1.5;
+  for (let i = 0; i < n; i++) {
+    const a = rng() * TAU;
+    const r0 = R * 1.02, r1 = R * (1.25 + rng() * 0.15);
+    g.globalAlpha = 0.3 + rng() * 0.2;
+    g.beginPath();
+    g.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0);
+    g.lineTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1);
+    g.stroke();
+  }
+  g.globalAlpha = 1;
+  return base;
+}
+
+function bakeRepulsor(R, seed) {
+  const base = bakePlanet(R, BODY_RAMP.rep, seed, { force4: true });
+  const g = base.c.getContext('2d');
+  const cx = base.size / 2, cy = base.size / 2;
+  // 虚线圈 + 4 外扩箭头（斥力形状编码）
+  g.strokeStyle = rgba(PAL.dangerHi, 0.7);
+  g.lineWidth = 1.5;
+  g.setLineDash([5, 5]);
+  g.beginPath(); g.arc(cx, cy, R + 7, 0, TAU); g.stroke();
+  g.setLineDash([]);
+  for (let i = 0; i < 4; i++) {
+    const a = i * Math.PI / 2 + Math.PI / 4;
+    const r0 = R + 10, r1 = R + 10 + R * 0.5;
+    const x0 = cx + Math.cos(a) * r0, y0 = cy + Math.sin(a) * r0;
+    const x1 = cx + Math.cos(a) * r1, y1 = cy + Math.sin(a) * r1;
+    g.strokeStyle = rgba(PAL.danger, 0.8);
+    g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke();
+    // 箭头尖
+    const aw = 0.35;
+    g.beginPath();
+    g.moveTo(x1, y1);
+    g.lineTo(x1 - Math.cos(a - aw) * 7, y1 - Math.sin(a - aw) * 7);
+    g.lineTo(x1 - Math.cos(a + aw) * 7, y1 - Math.sin(a + aw) * 7);
+    g.closePath();
+    g.fillStyle = rgba(PAL.danger, 0.8); g.fill();
+  }
+  return base;
+}
+
+function bakeTerrainBH(R, seed) {
+  // 五层 danger 系（§7.5 裁决 10）
+  const diskR = R * 3.05, size = diskR * 2;
+  const c = mkCanvas(size, size), g = c.getContext('2d');
+  const cx = size / 2, cy = size / 2;
+  // 外晕
+  g.drawImage(S.glow.danger[128], cx - diskR, cy - diskR, diskR * 2, diskR * 2);
+  // 吸积盘（扁椭圆）
+  g.save();
+  g.translate(cx, cy); g.rotate(-0.35); g.scale(1, 0.32);
+  const grad = g.createRadialGradient(0, 0, R * 1.05, 0, 0, R * 3.0);
+  grad.addColorStop(0, 'rgba(255,232,238,0.95)');
+  grad.addColorStop(0.3, rgba(PAL.danger, 0.55));
+  grad.addColorStop(1, 'rgba(179,36,74,0)');
+  g.fillStyle = grad;
+  g.beginPath(); g.arc(0, 0, R * 3.0, 0, TAU); g.fill();
+  g.restore();
+  // 视界 + 光子环
+  g.fillStyle = '#000';
+  g.beginPath(); g.arc(cx, cy, R, 0, TAU); g.fill();
+  g.strokeStyle = 'rgba(255,138,155,0.85)';
+  g.lineWidth = 1.5;
+  g.beginPath(); g.arc(cx, cy, R * 1.18, 0, TAU); g.stroke();
+  return { c, size };
+}
+
+/* ---------- 飞船精灵 ---------- */
+function bakeShip() {
+  const c = mkCanvas(28, 28), g = c.getContext('2d');
+  const cx = 14, cy = 14;
+  g.drawImage(S.glow.ice[32], 0, 0, 28, 28);
+  g.fillStyle = '#e8f8ff';
+  g.strokeStyle = PAL.ice;
+  g.lineWidth = 1.2;
+  g.beginPath();
+  g.moveTo(cx + 8, cy);
+  g.lineTo(cx - 6, cy - 5.5);
+  g.lineTo(cx - 3, cy);
+  g.lineTo(cx - 6, cy + 5.5);
+  g.closePath();
+  g.fill(); g.stroke();
+  S.ship = c;
+}
+
+/* ---------- 虫洞内盘 ---------- */
+function bakeWormhole(rw) {
+  const size = Math.ceil(rw * 2.6);
+  const c = mkCanvas(size, size), g = c.getContext('2d');
+  const cx = size / 2, cy = size / 2;
+  const grad = g.createRadialGradient(cx, cy, 0, cx, cy, rw);
+  grad.addColorStop(0, rgba(PAL.okHi, 0.5));
+  grad.addColorStop(0.6, rgba(PAL.ok, 0.18));
+  grad.addColorStop(1, rgba(PAL.ok, 0));
+  g.fillStyle = grad;
+  g.beginPath(); g.arc(cx, cy, rw, 0, TAU); g.fill();
+  return { c, size };
+}
+
+/* ---------- 背景：烘焙底 + 星云 + 视差星场（§7.4） ---------- */
+function bakeBackground(seed) {
+  // 第 0 层：全屏渐变 + 暗角
+  const bg = mkCanvas(1760, 1060), g = bg.getContext('2d');
+  const grad = g.createLinearGradient(0, 0, 0, 1060);
+  grad.addColorStop(0, PAL.bg0);
+  grad.addColorStop(0.55, PAL.bg1);
+  grad.addColorStop(1, PAL.bg2);
+  g.fillStyle = grad; g.fillRect(0, 0, 1760, 1060);
+  g.globalCompositeOperation = 'multiply';
+  const rng = mulberry32(seed ^ 0xabcd);
+  for (const [x, y] of [[128, 128], [1632, 128], [128, 932], [1632, 932]]) {
+    const rg = g.createRadialGradient(x, y, 0, x, y, 256);
+    rg.addColorStop(0, 'rgba(140,140,160,0.25)');
+    rg.addColorStop(1, 'rgba(255,255,255,1)');
+    g.fillStyle = rg;
+    g.beginPath(); g.arc(x, y, 256, 0, TAU); g.fill();
+  }
+  g.globalCompositeOperation = 'source-over';
+  S.bg = bg;
+
+  // 第 1 层：星云 ×2（饱和三色 + 羽化，per 关重烘）
+  const mkNebula = (sd) => {
+    const c = mkCanvas(1024, 1024), g2 = c.getContext('2d');
+    const r2 = mulberry32(sd);
+    const cols = ['#1c2c5e', '#3a1f5e', '#5e2a1a'];
+    g2.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < 60; i++) {
+      const x = r2() * 1024, y = r2() * 1024;
+      const rr = 1024 * (0.12 + r2() * 0.30);
+      const col = cols[Math.floor(r2() * 3)];
+      const a = 0.10 + r2() * 0.16;
+      const rg2 = g2.createRadialGradient(x, y, 0, x, y, rr);
+      rg2.addColorStop(0, rgba(col, a));
+      rg2.addColorStop(1, rgba(col, 0));
+      g2.fillStyle = rg2;
+      g2.beginPath(); g2.arc(x, y, rr, 0, TAU); g2.fill();
+    }
+    g2.globalCompositeOperation = 'multiply';
+    for (let i = 0; i < 6; i++) {
+      const x = r2() * 1024, y = r2() * 1024;
+      const rr = 1024 * (0.15 + r2() * 0.25);
+      const rg3 = g2.createRadialGradient(x, y, 0, x, y, rr);
+      rg3.addColorStop(0, 'rgba(90,90,110,0.12)');
+      rg3.addColorStop(1, 'rgba(255,255,255,1)');
+      g2.fillStyle = rg3;
+      g2.beginPath(); g2.arc(x, y, rr, 0, TAU); g2.fill();
+    }
+    // 边缘羽化：destination-out 径向擦除，消除矩形接缝
+    g2.globalCompositeOperation = 'destination-out';
+    const feather = g2.createRadialGradient(512, 512, 240, 512, 512, 512);
+    feather.addColorStop(0, 'rgba(0,0,0,0)');
+    feather.addColorStop(1, 'rgba(0,0,0,1)');
+    g2.fillStyle = feather;
+    g2.fillRect(0, 0, 1024, 1024);
+    g2.globalCompositeOperation = 'source-over';
+    return c;
+  };
+  S.nebula1 = mkNebula(seed * 31 + 1);
+  S.nebula2 = mkNebula(seed * 31 + 2);
+
+  // 第 2 层：视差星场 3 层（220/130/60）
+  const mkTile = (count, sd) => {
+    const c = mkCanvas(512, 512), g3 = c.getContext('2d');
+    const r3 = mulberry32(sd);
+    for (let i = 0; i < count; i++) {
+      const p = r3();
+      const col = p < 0.75 ? '#c7d3ea' : p < 0.92 ? '#ffe9c9' : '#9bb0ff';
+      g3.globalAlpha = 0.3 + r3() * 0.7;
+      g3.fillStyle = col;
+      const sz = r3() < 0.85 ? 1 : 2;
+      g3.fillRect(r3() * 511, r3() * 511, sz, sz);
+    }
+    return c;
+  };
+  S.starTiles = [mkTile(220, seed + 11), mkTile(130, seed + 22), mkTile(60, seed + 33)];
+
+  // 顶层手工亮星（闪烁参数）
+  S.brightStars = [];
+  const r4 = mulberry32(seed + 44);
+  for (let i = 0; i < 12; i++) {
+    S.brightStars.push({ x: r4() * 1600, y: r4() * 900, w: 1.5 + r4() * 1.5, ph: r4() * TAU, sz: r4() < 0.4 ? 10 : 7 });
+  }
+}
+
+/* ---------- 全量烘焙入口 ---------- */
+function bakeAll(seed) {
+  PAL = SETTINGS && SETTINGS.colorblind ? PAL_CB : PAL_BASE;
+  bakeGlows();
+  bakeBHDisks();
+  bakeShip();
+  bakeBackground(seed || 20261024);
+}
+
+
+/* ============================================================
+ * 牵星 QIANXING · 04_render.js
+ * 场景渲染管线（§7.3）：bg → 星尘 → 星云 → 星场 → 实体 → 幽灵 → 预测 → 粒子
+ * ============================================================ */
+'use strict';
+
+const V = { canvas: null, ctx: null, dpr: 1, scale: 1, ox: 0, oy: 0, w: 0, h: 0, t: 0 };
+
+function fitCanvas() {
+  const cv = V.canvas, dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  V.dpr = dpr;
+  V.w = window.innerWidth; V.h = window.innerHeight;
+  cv.width = Math.round(V.w * dpr); cv.height = Math.round(V.h * dpr);
+  cv.style.width = V.w + 'px'; cv.style.height = V.h + 'px';
+  V.scale = Math.min(V.w / 1760, V.h / 1060);
+  V.ox = (V.w - 1760 * V.scale) / 2;
+  V.oy = (V.h - 1060 * V.scale) / 2;
+}
+
+/* 世界(1600×900) → 屏幕 */
+function wx(x) { return V.ox + (x + 80) * V.scale; }
+function wy(y) { return V.oy + (y + 80) * V.scale; }
+function screenToWorld(px, py) {
+  return { x: (px - V.ox) / V.scale - 80, y: (py - V.oy) / V.scale - 80 };
+}
+
+function renderFrame(dtRaw) {
+  const g = V.ctx;
+  V.t += dtRaw;
+  g.setTransform(V.dpr, 0, 0, V.dpr, 0, 0);
+  g.fillStyle = '#000';
+  g.fillRect(0, 0, V.w, V.h);
+
+  // 震动（trauma² 模型，§9）
+  const sh = FX.trauma * FX.trauma * (SETTINGS.shakeScale || 1) * (SETTINGS.fxScale || 1);
+  const shx = (Math.random() * 2 - 1) * 14 * sh;
+  const shy = (Math.random() * 2 - 1) * 12 * sh;
+  const rot = (Math.random() * 2 - 1) * 0.025 * sh;
+  g.translate(V.w / 2 + shx, V.h / 2 + shy);
+  g.rotate(rot);
+  g.translate(-V.w / 2, -V.h / 2);
+
+  // 视口内容盒
+  g.save();
+  g.beginPath();
+  g.rect(V.ox, V.oy, 1760 * V.scale, 1060 * V.scale);
+  g.clip();
+  g.imageSmoothingEnabled = true;
+
+  drawBackground(g);
+  drawStardust(g);
+  drawEntities(g);
+  drawGhostTrails(g);
+  drawPrediction(g);
+  FX.drawParticles(g, V.scale);
+  g.restore();
+
+  // 世界绕坠点缩放（吞没/坠毁演出）
+  FX.drawWorldZoom(g);
+
+  // 全屏闪光与 hit-stop 暗幕
+  FX.drawFlashes(g);
+
+  // HUD（屏幕空间）
+  g.setTransform(V.dpr, 0, 0, V.dpr, 0, 0);
+  drawHUD(g);
+  UI.draw(g, dtRaw);
+}
+
+/* ---------- 背景 ---------- */
+function drawBackground(g) {
+  g.drawImage(S.bg, V.ox, V.oy, 1760 * V.scale, 1060 * V.scale);
+  const bx = V.ox, by = V.oy, bs = V.scale;
+  // 星云（视差 0.05/0.12）
+  g.globalAlpha = 0.6;
+  const px1 = -FX.camX * 0.05, py1 = -FX.camY * 0.05;
+  g.drawImage(S.nebula1, bx + px1 * bs, by + py1 * bs + 106 * bs, 760 * bs, 760 * bs);
+  g.drawImage(S.nebula2, bx + 1000 * bs + px1 * 1.4, by + py1 * 1.4 + 40 * bs, 760 * bs, 760 * bs);
+  g.globalAlpha = 1;
+  // 星场 3 层（视差 0.08/0.22/0.5）
+  const layers = [[0.08, 0], [0.22, 1], [0.5, 2]];
+  for (const [z, idx] of layers) {
+    const tile = S.starTiles[idx];
+    const size = 512 * bs;
+    const offX = -FX.camX * z * bs, offY = -FX.camY * z * bs;
+    const startX = bx + ((offX % size) + size) % size - size;
+    const startY = by + ((offY % size) + size) % size - size;
+    const alpha = [0.55, 0.7, 0.9][idx];
+    g.globalAlpha = alpha;
+    for (let x = startX; x < bx + 1760 * bs; x += size) {
+      for (let y = startY; y < by + 1060 * bs; y += size) {
+        g.drawImage(tile, x, y, size, size);
+      }
+    }
+  }
+  g.globalAlpha = 1;
+  // 顶层亮星（双层光 + 闪烁）
+  for (const st of S.brightStars) {
+    const a = 0.6 + 0.4 * Math.sin(V.t * st.w + st.ph);
+    g.globalAlpha = a * 0.9;
+    const sz = st.sz * bs;
+    g.drawImage(S.glow.white[32], wx(st.x) - sz / 2, wy(st.y) - sz / 2, sz, sz);
+    g.globalAlpha = 1;
+    g.fillStyle = '#e8f4ff';
+    g.fillRect(wx(st.x) - 0.7, wy(st.y) - 0.7, 1.5, 1.5);
+  }
+}
+
+/* ---------- 星尘层（§7.10） ---------- */
+function drawStardust(g) {
+  if (!GAME.stardust) return;
+  g.drawImage(GAME.stardust, wx(-80), wy(-80), 1760 * V.scale, 1060 * V.scale);
+}
+
+/* ---------- 实体 ---------- */
+function drawEntities(g) {
+  const W = GAME.W;
+  if (!W) return;
+  const bs = V.scale;
+  // 天体
+  for (let i = 0; i < W.bodies.length; i++) {
+    const b = W.bodies[i];
+    const spr = GAME.levelSprites[i];
+    if (!spr) continue;
+    const x = wx(b.x), y = wy(b.y);
+    if (b.type === 'star') {
+      // 暖晕 + 呼吸
+      g.globalAlpha = 0.9 + 0.08 * Math.sin(V.t * 2);
+      const halo = b.r * 6.4 * bs;
+      g.drawImage(S.glow.danger[128], x - halo / 2, y - halo / 2, halo, halo);
+      g.globalAlpha = 1;
+      const core = b.r * 2.6 * bs;
+      g.drawImage(S.glow.white[64], x - core / 2, y - core / 2, core, core);
+    }
+    if (b.type === 'blackhole') {
+      // 地形黑洞呼吸
+      g.globalAlpha = 0.9 + 0.1 * Math.sin(V.t * 1.6);
+    }
+    g.drawImage(spr.c, x - spr.size * bs / 2, y - spr.size * bs / 2, spr.size * bs, spr.size * bs);
+    g.globalAlpha = 1;
+    // 恒星近失闪光（§9 条目 16：芒刺闪 1 次）
+    if (b.type === 'star' && GAME.starFlash && GAME.starFlash[i] > 0) {
+      g.globalCompositeOperation = 'lighter';
+      g.globalAlpha = clamp(GAME.starFlash[i] * 3, 0, 0.9);
+      const fsz = b.r * 2.6 * bs;
+      g.drawImage(S.glow.white[64], x - fsz / 2, y - fsz / 2, fsz, fsz);
+      g.globalCompositeOperation = 'source-over';
+      g.globalAlpha = 1;
+    }
+    // 引力羽流环（恒星/地形黑洞，§2.5）
+    if (b.type === 'star' || b.type === 'blackhole') {
+      g.save();
+      g.strokeStyle = rgba(PAL.gold, 0.25);
+      g.lineWidth = 1;
+      g.setLineDash([4, 6]);
+      g.lineDashOffset = -V.t * 12;
+      g.beginPath();
+      g.arc(x, y, (b.r + 18) * bs, 0, TAU);
+      g.stroke();
+      g.restore();
+    }
+    // 等速圈（行星/卫星，v_c=100/200）
+    if ((b.type === 'planet' || b.type === 'moon') && SETTINGS.isoRings !== false) {
+      g.strokeStyle = 'rgba(42,53,80,0.8)';
+      g.lineWidth = 1;
+      g.setLineDash([3, 7]);
+      for (const vc of [100, 200]) {
+        const rr = Math.abs(b.mu) / (vc * vc);
+        if (rr < 8 || rr > 1300) continue;
+        g.beginPath(); g.arc(x, y, rr * bs, 0, TAU); g.stroke();
+      }
+      g.setLineDash([]);
+    }
+  }
+  drawPad(g, bs);
+  drawWormhole(g, bs);
+  if (W.ship) drawShip(g, bs);
+  drawPlayerBH(g, bs);
+}
+
+/* 发射台光柱（§2.2） */
+function drawPad(g, bs) {
+  const L = GAME.W.level;
+  const x = wx(L.start.x), y = wy(L.start.y);
+  let alpha;
+  if (GAME.W.phase === 'charge') {
+    alpha = 0.35 + 0.65 * clamp(GAME.W.phaseT / GAME.W.chargeDur, 0, 1);
+  } else {
+    alpha = 0.35 + 0.1 * Math.sin(V.t * 2);
+  }
+  if (GAME.padFlash > 0) alpha = Math.max(alpha, GAME.padFlash * 0.6);
+  g.globalAlpha = clamp(alpha, 0, 1);
+  const hgt = 150 * bs, wdt = 26 * bs;
+  const grd = g.createLinearGradient(x, y - hgt / 2, x, y + hgt / 2);
+  grd.addColorStop(0, rgba(PAL.ice, 0));
+  grd.addColorStop(0.5, rgba(PAL.ice, 0.5));
+  grd.addColorStop(1, rgba(PAL.ice, 0));
+  g.fillStyle = grd;
+  g.fillRect(x - wdt / 2, y - hgt / 2, wdt, hgt);
+  // 台座
+  g.globalAlpha = 0.8;
+  g.strokeStyle = rgba(PAL.ice, 0.7);
+  g.lineWidth = 1.5 * bs;
+  g.beginPath(); g.arc(x, y, 10 * bs, Math.PI * 0.15, Math.PI * 0.85, true); g.stroke();
+  g.globalAlpha = 1;
+}
+
+/* 虫洞（§7.7 + 终审可见性增强） */
+function drawWormhole(g, bs) {
+  const tg = GAME.W.target;
+  const x = wx(tg.x), y = wy(tg.y);
+  // 目标光晕（全场最弱元素 → 提到与恒星晕同量级）
+  g.globalCompositeOperation = 'lighter';
+  g.globalAlpha = 0.35 + 0.1 * Math.sin(V.t * 3);
+  const halo = tg.r * 6 * bs;
+  g.drawImage(S.glow.ok[128], x - halo / 2, y - halo / 2, halo, halo);
+  g.globalCompositeOperation = 'source-over';
+  g.globalAlpha = 1;
+  const spr = GAME.wormholeSprite;
+  if (spr) g.drawImage(spr.c, x - spr.size * bs / 2, y - spr.size * bs / 2, spr.size * bs, spr.size * bs);
+  // 外环脉冲
+  g.strokeStyle = rgba(PAL.ok, 0.85 + 0.15 * Math.sin(V.t * 6));
+  g.lineWidth = 2 * bs;
+  g.beginPath(); g.arc(x, y, tg.r * 1.35 * bs, 0, TAU); g.stroke();
+  // 旋转外圈虚线（r×1.8）
+  g.strokeStyle = rgba(PAL.ok, 0.4);
+  g.lineWidth = 1;
+  g.setLineDash([4 * bs, 10 * bs]);
+  g.lineDashOffset = -V.t * 20;
+  g.beginPath(); g.arc(x, y, tg.r * 1.8 * bs, 0, TAU); g.stroke();
+  g.setLineDash([]);
+  // 内环旋转虚线
+  g.strokeStyle = rgba(PAL.okHi, 0.9);
+  g.lineWidth = 1;
+  g.setLineDash([6 * bs, 8 * bs]);
+  g.lineDashOffset = -V.t * 30;
+  g.beginPath(); g.arc(x, y, tg.r * bs, 0, TAU); g.stroke();
+  g.setLineDash([]);
+  // 近失白闪
+  if (GAME.targetFlash > 0) {
+    g.globalAlpha = clamp(GAME.targetFlash, 0, 1);
+    g.strokeStyle = '#ffffff';
+    g.lineWidth = 3 * bs;
+    g.beginPath(); g.arc(x, y, tg.r * 1.35 * bs, 0, TAU); g.stroke();
+    g.globalAlpha = 1;
+  }
+}
+
+/* 飞船 + 拖尾 + 意大利面化（§7.8） */
+function drawShip(g, bs) {
+  const s = GAME.W.ship;
+  const x = wx(s.x), y = wy(s.y);
+  const ang = Math.atan2(s.vy, s.vx);
+  // 拖尾（14 点历史）
+  const tr = GAME.trail;
+  if (tr.length > 1) {
+    const split = FX.stretchSplit;
+    const draws = split ? 3 : 1;
+    for (let d = 0; d < draws; d++) {
+      const off = d === 0 ? 0 : (d === 1 ? -6 : 6);
+      g.beginPath();
+      g.moveTo(wx(tr[0].x) + off * bs, wy(tr[0].y));
+      for (let i = 1; i < tr.length; i++) g.lineTo(wx(tr[i].x) + off * bs, wy(tr[i].y));
+      for (let i = tr.length - 1; i >= 0; i--) {
+        const a = Math.pow(i / tr.length, 1.5) * 0.6 * (d === 0 ? 1 : 0.5);
+        g.strokeStyle = FX.trailGold > 0 && d === 0
+          ? rgba(PAL.gold, a)
+          : rgba(i > tr.length * 0.6 ? '#63E6FF' : PAL.iceMid, a);
+        g.lineWidth = (4 * (i / tr.length) + 0.5) * bs;
+        if (i < tr.length - 1) {
+          g.beginPath();
+          g.moveTo(wx(tr[i].x) + off * bs, wy(tr[i].y));
+          g.lineTo(wx(tr[i + 1].x) + off * bs, wy(tr[i + 1].y));
+          g.stroke();
+        }
+      }
+    }
+    // 头部小晕
+    g.globalCompositeOperation = 'lighter';
+    g.globalAlpha = 0.55;
+    const hsz = 22 * bs;
+    g.drawImage(S.glow.ice[32], x - hsz / 2, y - hsz / 2, hsz, hsz);
+    g.globalAlpha = 1;
+    g.globalCompositeOperation = 'source-over';
+  }
+  // 拉伸（潮汐）
+  const st = FX.stretch;
+  g.save();
+  g.translate(x, y);
+  g.rotate(ang);
+  g.scale(1 + (st - 1) * 0.6, 1 / (1 + (st - 1) * 0.25));
+  const sz = 28 * bs * (1 + (st - 1) * 0.5);
+  g.drawImage(S.ship, -sz / 2, -sz / 2, sz, sz);
+  g.restore();
+}
+
+/* 玩家黑洞五层（§7.6） */
+function drawPlayerBH(g, bs) {
+  const bh = GAME.W.bh;
+  const x = wx(bh.x), y = wy(bh.y);
+  const R = CFG.BH_R;
+  const sleeping = !bh.wake;
+  const ig = bh.ignite;
+  const dim = sleeping ? 0.5 : 1;
+
+  // 引力丝（光标→黑洞贝塞尔，§7.6）
+  const tx = wx(bh.tx), ty = wy(bh.ty);
+  const dist = Math.hypot(bh.tx - bh.x, bh.ty - bh.y);
+  const tens = clamp(dist / 300, 0, 1);
+  const sag = 24 * tens * bs;
+  let threadA = (0.12 + 0.45 * tens) * (sleeping ? 0.3 : 1);
+  if (ig) threadA *= 1.2;
+  g.strokeStyle = rgba(PAL.amber, clamp(threadA, 0, 0.8));
+  g.lineWidth = (1 + 1.5 * tens) * bs * (ig ? 1.8 : 1);
+  const mx = (x + tx) / 2, my = (y + ty) / 2 + sag;
+  g.beginPath(); g.moveTo(tx, ty); g.quadraticCurveTo(mx, my, x, y); g.stroke();
+
+  // ① 外围暖晕
+  g.globalCompositeOperation = 'lighter';
+  let halo = 320 * bs * (ig ? 1.25 : 1);
+  let haloA = (ig ? 0.85 : 0.5) * dim;
+  if (ig) haloA += Math.sin(V.t * 10) * 0.08;
+  g.globalAlpha = clamp(haloA, 0, 1);
+  g.drawImage(S.glow.amber[256], x - halo / 2, y - halo / 2, halo, halo);
+  // ② 吸积盘（压扁椭圆）
+  g.save();
+  g.translate(x, y); g.rotate(-0.35); g.scale(1, 0.32);
+  const disk = ig ? S.bhDiskHot : S.bhDisk;
+  g.globalAlpha = 0.95 * dim;
+  g.drawImage(disk, -64 * bs, -64 * bs, 128 * bs, 128 * bs);
+  g.restore();
+  // ③ 事件视界（source-over 盖住盘 → 前后穿插）
+  g.globalCompositeOperation = 'source-over';
+  g.globalAlpha = 1;
+  g.fillStyle = '#000';
+  g.beginPath(); g.arc(x, y, R * bs, 0, TAU); g.fill();
+  // ④ 透镜竖拱（上半 clip）
+  g.globalCompositeOperation = 'lighter';
+  g.save();
+  g.beginPath(); g.rect(x - 5 * R * bs, y - 5 * R * bs, 10 * R * bs, 5 * R * bs); g.clip();
+  g.globalAlpha = 0.55 * dim;
+  const arch = 67 * bs;
+  g.drawImage(S.glow.amber[64], x - arch / 2, y - arch / 2, arch, arch);
+  g.restore();
+  // ⑤ 光子环
+  g.globalCompositeOperation = 'source-over';
+  g.globalAlpha = 0.85 * dim + 0.15;
+  g.strokeStyle = 'rgba(255,243,224,0.85)';
+  g.lineWidth = 1.5 * bs;
+  g.beginPath(); g.arc(x, y, R * 1.18 * bs, 0, TAU); g.stroke();
+  // 吸积粒子
+  if (!sleeping) {
+    g.globalCompositeOperation = 'lighter';
+    for (const p of S.bhDust) {
+      const px2 = x + Math.cos(p.a) * p.r * bs, py2 = y + Math.sin(p.a) * p.r * bs * 0.55;
+      g.globalAlpha = 0.5;
+      const dsz = 5 * bs;
+      g.drawImage(S.glow.amber[32], px2 - dsz / 2, py2 - dsz / 2, dsz, dsz);
+    }
+    g.globalCompositeOperation = 'source-over';
+  }
+  // 透镜星环（整体旋转 0.15 rad/s）
+  g.globalCompositeOperation = 'lighter';
+  g.globalAlpha = 0.5 * dim;
+  g.save();
+  g.translate(x, y); g.rotate(V.t * 0.15);
+  g.drawImage(S.lensRing, -64 * bs, -64 * bs, 128 * bs, 128 * bs);
+  g.restore();
+  g.globalCompositeOperation = 'source-over';
+  g.globalAlpha = 1;
+  // 燃料环（黑洞旁，§6.2；fuel 为罐比例 [0,1]）
+  if (bh.wake) {
+    const fr = 26 * bs;
+    const frac = clamp(bh.fuel, 0, 1);
+    g.lineWidth = 3 * bs;
+    g.strokeStyle = bh.everEmpty && frac < 1 ? rgba(PAL.danger, 0.5 + 0.5 * Math.abs(Math.sin(V.t * 4 * Math.PI))) : rgba(PAL.amber, 0.28);
+    g.beginPath(); g.arc(x, y, fr, -Math.PI / 2, -Math.PI / 2 + TAU); g.stroke();
+    g.strokeStyle = FX.fuelBlink > 0 && frac <= 0 ? rgba(PAL.danger, 0.9) : rgba(PAL.amber, 0.85);
+    g.beginPath(); g.arc(x, y, fr, -Math.PI / 2, -Math.PI / 2 + TAU * frac); g.stroke();
+  }
+  // 停靠位脉动（休眠期）
+  if (sleeping) {
+    const a = 0.3 + 0.1 * Math.sin(V.t * 3);
+    g.strokeStyle = rgba(PAL.amber, a);
+    g.setLineDash([3, 5]);
+    g.beginPath(); g.arc(x, y, 30 * bs, 0, TAU); g.stroke();
+    g.setLineDash([]);
+  }
+  // 吞没 flare
+  if (FX.bhFlare > 0) {
+    g.globalCompositeOperation = 'lighter';
+    g.globalAlpha = FX.bhFlare * 0.5;
+    const fs = 140 * bs;
+    g.drawImage(S.glow.amber[128], x - fs / 2, y - fs / 2, fs, fs);
+    g.globalCompositeOperation = 'source-over';
+    g.globalAlpha = 1;
+  }
+}
+
+/* ---------- 幽灵轨迹（动态层，§7.10） ---------- */
+function drawGhostTrails(g) {
+  const arr = GAME.failTrails;
+  const alphas = [0.30, 0.20, 0.12];
+  for (let i = 0; i < Math.min(3, arr.length); i++) {
+    const tr = arr[arr.length - 1 - i];
+    if (!tr || tr.length < 2) continue;
+    g.strokeStyle = rgba('#57617f', alphas[i]);
+    g.lineWidth = (1.5 - i * 0.5) * V.scale;
+    g.beginPath();
+    g.moveTo(wx(tr[0].x), wy(tr[0].y));
+    for (let j = 1; j < tr.length; j++) g.lineTo(wx(tr[j].x), wy(tr[j].y));
+    g.stroke();
+  }
+  // 上局残影（护送）
+  if (GAME.dailyGhost && GAME.dailyGhost.length) {
+    g.strokeStyle = rgba('#57617f', 0.3);
+    g.lineWidth = 1.2 * V.scale;
+    for (const tr of GAME.dailyGhost) {
+      if (!tr.length) continue;
+      g.beginPath();
+      g.moveTo(wx(tr[0].x), wy(tr[0].y));
+      for (let j = 1; j < tr.length; j++) g.lineTo(wx(tr[j].x), wy(tr[j].y));
+      g.stroke();
+    }
+  }
+  // 解法虚线（同关死亡 ≥3 次，§5.1）
+  if (GAME.solutionHint && GAME.deathCount >= 3) {
+    g.setLineDash([6, 8]);
+    g.strokeStyle = rgba(PAL.ice, 0.35 + 0.15 * Math.sin(V.t * 3));
+    g.lineWidth = 1.2 * V.scale;
+    g.beginPath();
+    g.moveTo(wx(GAME.solutionHint[0].x), wy(GAME.solutionHint[0].y));
+    for (const p of GAME.solutionHint) g.lineTo(wx(p.x), wy(p.y));
+    g.stroke();
+    g.setLineDash([]);
+  }
+}
+
+/* ---------- 预测线（§9 条目 4/5） ---------- */
+function drawPrediction(g) {
+  const pts = GAME.predPts;
+  if (!pts || pts.length < 2) return;
+  const isCharge = GAME.W.phase === 'charge';
+  let baseA = isCharge ? 0.3 + 0.3 * clamp(GAME.W.phaseT / GAME.W.chargeDur, 0, 1) : 0.85;
+  if (GAME.W.bh.ignite) baseA *= 0.45;
+  const L = pts.length;
+  for (let i = 0; i < L; i++) {
+    const a = Math.max(baseA * (1 - 0.7 * (i / L)), 0.3 * baseA / 0.85);
+    const isAccent = i % 8 === 0 && i > 0;
+    g.fillStyle = rgba('#63E6FF', a);
+    g.beginPath();
+    g.arc(wx(pts[i].x), wy(pts[i].y), (isAccent ? 3.2 : 2.2) * V.scale, 0, TAU);
+    g.fill();
+  }
+  const end = GAME.predEnd;
+  const p = pts[L - 1];
+  if (end === 'deliver') {
+    g.strokeStyle = rgba(PAL.ok, 0.9);
+    g.lineWidth = 2 * V.scale;
+    const c = 8 * V.scale;
+    g.beginPath();
+    g.moveTo(wx(p.x) - c, wy(p.y)); g.lineTo(wx(p.x) + c, wy(p.y));
+    g.moveTo(wx(p.x), wy(p.y) - c); g.lineTo(wx(p.x), wy(p.y) + c);
+    g.stroke();
+  } else if (end === 'dead') {
+    // 预测坠毁终点（§9 条目 4：红十字 + t 标签）
+    const a = 0.55 + 0.35 * Math.sin(V.t * 8);
+    g.strokeStyle = rgba('#FF5A5A', a);
+    g.lineWidth = 2 * V.scale;
+    const c = 6 * V.scale;
+    const px2 = wx(p.x), py2 = wy(p.y);
+    g.beginPath();
+    g.moveTo(px2 - c, py2 - c); g.lineTo(px2 + c, py2 + c);
+    g.moveTo(px2 + c, py2 - c); g.lineTo(px2 - c, py2 + c);
+    g.stroke();
+    g.font = '600 ' + Math.max(11, 12 * V.scale) + 'px "Segoe UI",sans-serif';
+    g.fillStyle = rgba('#FF5A5A', a);
+    g.textAlign = 'left';
+    g.fillText('t+' + (GAME.predEndT || 0).toFixed(1) + 's', px2 + 9 * V.scale, py2 + 3 * V.scale);
+  }
+}
+
+
+/* ============================================================
+ * 牵星 QIANXING · 05_fx.js
+ * 手感服务（§7.9/§9）：trauma 震动、慢动作合成、hit-stop、
+ * 粒子池、冲击环、闪光、浮字、世界缩放、瞬帧故障
+ * ============================================================ */
+'use strict';
+
+/* ---------- 缓动 ---------- */
+const EASE = {
+  linear: (t) => t,
+  inQuad: (t) => t * t,
+  outQuad: (t) => t * (2 - t),
+  inCubic: (t) => t * t * t,
+  outCubic: (t) => 1 - Math.pow(1 - t, 3),
+  outQuart: (t) => 1 - Math.pow(1 - t, 4),
+  outBack: (t) => { const c = 1.70158 * 1.2; return 1 + (c + 1) * Math.pow(t - 1, 3) + c * Math.pow(t - 1, 2); },
+  outElastic: (t) => t === 0 ? 0 : t === 1 ? 1 : Math.pow(2, -10 * t) * Math.sin((t * 10 - 0.75) * (TAU / 3)) + 1,
+};
+
+const RAMP_EXPLODE = ['#fff7e0', '#ffd166', '#ff8c3b', '#e8442e', '#8c2b2b'];
+const RAMP_ION = ['#eaffff', '#8fe3ff', '#4aa8ff', '#2a5fd8'];
+const RAMP_CAPTURE = ['#eaffff', '#d8ffe8', '#8affc1', '#3fb6e8'];
+const RAMP_PLUME = ['#fff7e0', '#ffd166', '#ff8c3b'];
+
+const FX = {
+  trauma: 0, hitStopT: 0,
+  slowmo: [],            // {scale, t} 剩余时间（raw 秒）
+  flashes: [],           // {color, a, dur, t}
+  zoom: null,            // {x, y, from, to, t, dur}（世界坐标）
+  rings: [],             // 冲击环
+  texts: [],             // 浮字
+  glitchT: 0,
+  camX: 0, camY: 0,
+  stretch: 1, stretchSplit: false,
+  trailGold: 0, bhFlare: 0, fuelBlink: 0,
+  vignette: 0,
+  parts: [],
+};
+
+function fxReset() {
+  FX.trauma = 0; FX.hitStopT = 0; FX.slowmo = []; FX.flashes = [];
+  FX.zoom = null; FX.rings = []; FX.texts = []; FX.glitchT = 0;
+  FX.stretch = 1; FX.stretchSplit = false; FX.trailGold = 0; FX.bhFlare = 0;
+  FX.parts.length = 0; FX.vignette = 0;
+}
+
+function fxAddTrauma(a) {
+  FX.trauma = clamp(FX.trauma + a * (SETTINGS.fxScale || 1), 0, 1);
+}
+function fxSlowmo(scale, dur) {
+  FX.slowmo.push({ scale, t: dur });
+}
+function fxHitStop(dur) {
+  FX.hitStopT = Math.max(FX.hitStopT, dur);
+}
+function fxFlash(color, a, dur) {
+  FX.flashes.push({ color, a: a * (SETTINGS.fxScale || 1), dur, t: 0 });
+}
+function fxRing(x, y, opts) {
+  FX.rings.push(Object.assign({ x, y, r: 4, vr: 260, life: 0.3, t: 0, color: '#ffffff', lw: 4 }, opts || {}));
+}
+function fxText(x, y, text, color, opts) {
+  FX.texts.push(Object.assign({ x, y, text, color, t: 0, life: 0.9, big: false }, opts || {}));
+}
+function fxZoom(x, y, from, to, dur) {
+  FX.zoom = { x, y, from, to, t: 0, dur };
+}
+
+/* ---------- 粒子 ---------- */
+function fxSpawn(kind, x, y, n, opts) {
+  opts = opts || {};
+  const ramp = kind === 'explode' ? RAMP_EXPLODE : kind === 'capture' ? RAMP_CAPTURE : kind === 'plume' ? RAMP_PLUME : RAMP_ION;
+  const count = Math.round(n * clamp((SETTINGS.fxScale ?? 1), 0, 1.5));
+  for (let i = 0; i < count; i++) {
+    if (FX.parts.length >= 600) FX.parts.shift();
+    const a = opts.angle !== undefined ? opts.angle + (Math.random() - 0.5) * (opts.spread || TAU) : Math.random() * TAU;
+    const sp = (opts.speedMin || 60) + Math.random() * ((opts.speedMax || 260) - (opts.speedMin || 60));
+    FX.parts.push({
+      x, y,
+      vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      life: (opts.lifeMin || 0.25) + Math.random() * ((opts.lifeMax || 0.6) - (opts.lifeMin || 0.25)),
+      t: 0, drag: opts.drag || 4, ramp,
+      sz: opts.sz || 3,
+    });
+  }
+}
+
+function fxUpdate(dt) {
+  // trauma 衰减
+  FX.trauma = Math.max(0, FX.trauma - 1.6 * dt);
+  if (FX.hitStopT > 0) FX.hitStopT -= dt;
+  for (const s of FX.slowmo) s.t -= dt;
+  FX.slowmo = FX.slowmo.filter(s => s.t > 0);
+  for (const f of FX.flashes) f.t += dt;
+  FX.flashes = FX.flashes.filter(f => f.t < f.dur);
+  if (FX.zoom) { FX.zoom.t += dt; if (FX.zoom.t >= FX.zoom.dur) FX.zoom = null; }
+  for (const r of FX.rings) r.t += dt;
+  FX.rings = FX.rings.filter(r => r.t < r.life);
+  for (const t of FX.texts) t.t += dt;
+  FX.texts = FX.texts.filter(t => t.t < t.life);
+  if (FX.glitchT > 0) FX.glitchT -= dt;
+  if (FX.trailGold > 0) FX.trailGold -= dt;
+  if (FX.bhFlare > 0) FX.bhFlare -= dt * 2;
+  if (FX.fuelBlink > 0) FX.fuelBlink -= dt;
+  if (FX.vignette > 0) FX.vignette -= dt * 1.2;
+  // 粒子
+  for (let i = FX.parts.length - 1; i >= 0; i--) {
+    const p = FX.parts[i];
+    p.t += dt;
+    if (p.t >= p.life) { FX.parts.splice(i, 1); continue; }
+    const dr = Math.exp(-p.drag * dt);
+    p.vx *= dr; p.vy *= dr;
+    p.x += p.vx * dt; p.y += p.vy * dt;
+  }
+}
+
+/* 有效时间缩放：hit-stop > 慢动作 > 1 */
+function fxTimeScale() {
+  if (FX.hitStopT > 0) return 0;
+  let ts = 1;
+  for (const s of FX.slowmo) if (s.scale < ts) ts = s.scale;
+  return ts;
+}
+
+/* ---------- 绘制 ---------- */
+function fxColor(ramp, t) {
+  const idx = clamp(Math.floor(t * ramp.length), 0, ramp.length - 1);
+  return ramp[idx];
+}
+
+FX.drawParticles = function (g, bs) {
+  g.globalCompositeOperation = 'lighter';
+  for (const p of FX.parts) {
+    const lt = p.t / p.life;
+    const col = fxColor(p.ramp, lt);
+    const sz = p.sz * bs * (1 - lt * 0.6);
+    g.globalAlpha = 1 - lt;
+    // 火花线（沿速度拉伸）
+    const sp = Math.hypot(p.vx, p.vy);
+    if (sp > 40) {
+      const stretch = clamp(0.04 * sp, 0, 18) * bs;
+      g.strokeStyle = col;
+      g.lineWidth = sz * 0.8;
+      g.beginPath();
+      g.moveTo(wx(p.x), wy(p.y));
+      g.lineTo(wx(p.x) - (p.vx / sp) * stretch, wy(p.y) - (p.vy / sp) * stretch);
+      g.stroke();
+    } else {
+      g.fillStyle = col;
+      g.beginPath(); g.arc(wx(p.x), wy(p.y), sz, 0, TAU); g.fill();
+    }
+  }
+  // 冲击环
+  for (const r of FX.rings) {
+    const lt = r.t / r.life;
+    g.globalAlpha = 0.8 * (1 - lt);
+    g.strokeStyle = r.color;
+    g.lineWidth = Math.max(0.5, r.lw * (1 - lt)) * bs;
+    g.beginPath();
+    g.arc(wx(r.x), wy(r.y), (r.r + r.vr * r.t) * bs, 0, TAU);
+    g.stroke();
+  }
+  // 浮字（世界空间）
+  g.globalCompositeOperation = 'source-over';
+  for (const t of FX.texts) {
+    const lt = t.t / t.life;
+    const rise = EASE.outQuad(lt) * 30;
+    const sc = lt < 0.2 ? EASE.outBack(lt / 0.2) : 1;
+    g.save();
+    g.translate(wx(t.x), wy(t.y) - rise * bs);
+    g.scale(sc, sc);
+    g.globalAlpha = lt > 0.7 ? (1 - lt) / 0.3 : 1;
+    g.font = (t.big ? '700 ' : '600 ') + Math.round((t.big ? 22 : 15) * bs) + 'px "Segoe UI", "Microsoft YaHei", sans-serif';
+    g.textAlign = 'center';
+    g.fillStyle = t.color;
+    // 描边保证可读
+    g.strokeStyle = 'rgba(4,6,13,0.8)';
+    g.lineWidth = 3 * bs;
+    g.strokeText(t.text, 0, 0);
+    g.fillText(t.text, 0, 0);
+    g.restore();
+  }
+  g.globalAlpha = 1;
+};
+
+FX.drawWorldZoom = function (g) {
+  if (!FX.zoom) return;
+  const z = FX.zoom;
+  const lt = clamp(z.t / z.dur, 0, 1);
+  const k = z.from + (z.to - z.from) * EASE.outCubic(lt);
+  // 以坠点为中心的暗角 + 呼吸缩放感（叠加径向暗幕实现"聚焦"）
+  const x = wx(z.x), y = wy(z.y);
+  const rg = g.createRadialGradient(x, y, 0, x, y, Math.max(V.w, V.h) * (0.7 / k));
+  rg.addColorStop(0, 'rgba(0,0,0,0)');
+  rg.addColorStop(1, 'rgba(0,0,0,0.55)');
+  g.fillStyle = rg;
+  g.fillRect(0, 0, V.w, V.h);
+};
+
+FX.drawFlashes = function (g) {
+  g.setTransform(V.dpr, 0, 0, V.dpr, 0, 0);
+  for (const f of FX.flashes) {
+    const lt = f.t / f.dur;
+    g.globalAlpha = f.a * (1 - lt);
+    g.fillStyle = f.color;
+    g.fillRect(0, 0, V.w, V.h);
+  }
+  g.globalAlpha = 1;
+  // 坠毁同步闪红（声音不作唯一反馈，§7.2）
+  if (FX.vignette > 0) {
+    const rg = g.createRadialGradient(V.w / 2, V.h / 2, V.h * 0.3, V.w / 2, V.h / 2, V.h * 0.75);
+    rg.addColorStop(0, 'rgba(0,0,0,0)');
+    rg.addColorStop(1, rgba('#f43f5e', 0.35 * clamp(FX.vignette, 0, 1)));
+    g.fillStyle = rg;
+    g.fillRect(0, 0, V.w, V.h);
+  }
+  // 瞬帧故障（坠毁当帧，§9 条目 26）
+  if (FX.glitchT > 0) {
+    g.globalAlpha = clamp(FX.glitchT / 0.15, 0, 1) * 0.5;
+    for (let i = 0; i < 8; i++) {
+      const y = Math.random() * V.h;
+      const h = 2 + Math.random() * 6;
+      const off = (Math.random() * 2 - 1) * 50;
+      g.drawImage(V.canvas, 0, y * V.dpr, V.canvas.width, h * V.dpr, off, y, V.w, h);
+    }
+    g.globalAlpha = 1;
+  }
+};
+
+
+/* ============================================================
+ * 牵星 QIANXING · 06_audio.js
+ * WebAudio 全合成（§8）：总线/噪声缓冲/事件音效配方表/
+ * 环境垫 A+B/护送音乐循环/自动播放策略/慢动作联动
+ * ============================================================ */
+'use strict';
+
+const AUDIO = {
+  ctx: null, master: null, sfxBus: null, ambBus: null, slowLP: null,
+  muted: false, oscCount: 0,
+  noiseBuf: null, brownBuf: null,
+  igniteGain: null, dangerGain: null,
+  ambStarted: false, musicTimer: null, musicStep: 0, musicNext: 0,
+  lastPlay: {},
+};
+
+function audioInit() {
+  if (AUDIO.ctx) return;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  const ctx = new AC();
+  AUDIO.ctx = ctx;
+  // 总线：sfx/amb → slowLP → master → comp → dest（§8.6）
+  AUDIO.master = ctx.createGain(); AUDIO.master.gain.value = AUDIO.muted ? 0 : 0.9;
+  const comp = ctx.createDynamicsCompressor();
+  comp.threshold.value = -18; comp.knee.value = 24; comp.ratio.value = 6;
+  comp.attack.value = 0.003; comp.release.value = 0.25;
+  AUDIO.slowLP = ctx.createBiquadFilter(); AUDIO.slowLP.type = 'lowpass'; AUDIO.slowLP.frequency.value = 20000;
+  AUDIO.sfxBus = ctx.createGain(); AUDIO.sfxBus.gain.value = 0.9;
+  AUDIO.ambBus = ctx.createGain(); AUDIO.ambBus.gain.value = 0.0;
+  AUDIO.sfxBus.connect(AUDIO.slowLP);
+  AUDIO.ambBus.connect(AUDIO.slowLP);
+  AUDIO.slowLP.connect(AUDIO.master);
+  AUDIO.master.connect(comp);
+  comp.connect(ctx.destination);
+  // 噪声缓冲（只建一次）
+  AUDIO.noiseBuf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+  const wd = AUDIO.noiseBuf.getChannelData(0);
+  for (let i = 0; i < wd.length; i++) wd[i] = Math.random() * 2 - 1;
+  AUDIO.brownBuf = ctx.createBuffer(1, ctx.sampleRate * 4, ctx.sampleRate);
+  const bd = AUDIO.brownBuf.getChannelData(0);
+  let last = 0;
+  for (let i = 0; i < bd.length; i++) { last = (last + 0.02 * (Math.random() * 2 - 1)) / 1.02; bd[i] = last * 3.5; }
+  // 点火循环（常驻，gain 驱动）
+  {
+    const src = ctx.createBufferSource(); src.buffer = AUDIO.noiseBuf; src.loop = true;
+    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 180; bp.Q.value = 0.8;
+    AUDIO.igniteGain = ctx.createGain(); AUDIO.igniteGain.gain.value = 0;
+    src.connect(bp); bp.connect(AUDIO.igniteGain); AUDIO.igniteGain.connect(AUDIO.sfxBus);
+    src.start();
+  }
+  // 恒星危险区垫（常驻）
+  {
+    const g = ctx.createGain(); g.gain.value = 0;
+    for (const f of [55, 82.5]) {
+      const o = ctx.createOscillator(); o.type = 'sine'; o.frequency.value = f;
+      const og = ctx.createGain(); og.gain.value = 0.5;
+      o.connect(og); og.connect(g); o.start();
+    }
+    const lfo = ctx.createOscillator(); lfo.frequency.value = 6;
+    const lg = ctx.createGain(); lg.gain.value = 0.3;
+    lfo.connect(lg); lg.connect(g.gain); lfo.start();
+    AUDIO.dangerGain = g; g.connect(AUDIO.ambBus);
+  }
+  // 恒星垫淡入（解锁后 4s）
+  AUDIO.ambBus.gain.setTargetAtTime(0.0, ctx.currentTime, 0.01);
+}
+
+function audioUnlock() {
+  audioInit();
+  if (AUDIO.ctx && AUDIO.ctx.state !== 'running') AUDIO.ctx.resume().catch(() => {});
+  if (AUDIO.ctx && !AUDIO.ambStarted) {
+    AUDIO.ambStarted = true;
+    startAmbPad();
+    AUDIO.ambBus.gain.setTargetAtTime(0.55, AUDIO.ctx.currentTime, 2.0);
+  }
+}
+
+function audioSetMuted(m) {
+  AUDIO.muted = m;
+  try { localStorage.setItem('qianxing.muted', m ? '1' : '0'); } catch (e) { void e; }
+  if (AUDIO.ctx && AUDIO.master) AUDIO.master.gain.setTargetAtTime(m ? 0 : 0.9, AUDIO.ctx.currentTime, 0.02);
+}
+
+function audioSlowmoLP(on) {
+  if (!AUDIO.ctx || AUDIO._slow === on) return;
+  AUDIO._slow = on;
+  AUDIO.slowLP.frequency.setTargetAtTime(on ? 500 : 20000, AUDIO.ctx.currentTime, on ? 0.05 : 0.3);
+}
+
+/* ---------- 通用构件 ---------- */
+function aTone(o) {
+  const ctx = AUDIO.ctx;
+  if (!ctx || AUDIO.muted) return;
+  const key = 't:' + (o.key || o.type + (o.f0 | 0));
+  const now = performance.now();
+  if (AUDIO.lastPlay[key] && now - AUDIO.lastPlay[key] < 80) return;
+  AUDIO.lastPlay[key] = now;
+  const t0 = ctx.currentTime + 0.001;
+  const dur = o.dur || 0.2, vol = (o.vol || 0.2) * (0.92 + Math.random() * 0.16);
+  const osc = ctx.createOscillator();
+  osc.type = o.type || 'sine';
+  osc.frequency.setValueAtTime(Math.max(1, o.f0), t0);
+  if (o.f1 !== undefined && o.f1 !== o.f0) osc.frequency.exponentialRampToValueAtTime(Math.max(1, o.f1), t0 + (o.fSweep || dur));
+  const g = ctx.createGain();
+  const att = o.att || 0.008;
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.exponentialRampToValueAtTime(Math.max(0.0001, vol), t0 + att);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  let node = osc; node.connect(g); node = g;
+  if (o.lp) { const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = o.lp; node.connect(f); node = f; }
+  if (o.pan !== undefined && ctx.createStereoPanner) { const p = ctx.createStereoPanner(); p.pan.value = clamp(o.pan, -1, 1); node.connect(p); node = p; }
+  node.connect(AUDIO.sfxBus);
+  osc.start(t0); osc.stop(t0 + dur + 0.05);
+}
+
+function aNoise(o) {
+  const ctx = AUDIO.ctx;
+  if (!ctx || AUDIO.muted) return;
+  const key = 'n:' + (o.key || (o.f0 | 0));
+  const now = performance.now();
+  if (AUDIO.lastPlay[key] && now - AUDIO.lastPlay[key] < 80) return;
+  AUDIO.lastPlay[key] = now;
+  const t0 = ctx.currentTime + 0.001;
+  const dur = o.dur || 0.3, vol = (o.vol || 0.2) * (0.92 + Math.random() * 0.16);
+  const src = ctx.createBufferSource(); src.buffer = o.brown ? AUDIO.brownBuf : AUDIO.noiseBuf;
+  src.loop = true;
+  src.playbackRate.value = 0.92 + Math.random() * 0.16;
+  const f = ctx.createBiquadFilter();
+  f.type = o.ftype || 'bandpass';
+  f.frequency.setValueAtTime(Math.max(10, o.f0 || 1000), t0);
+  if (o.f1 !== undefined) f.frequency.exponentialRampToValueAtTime(Math.max(10, o.f1), t0 + (o.fSweep || dur));
+  f.Q.value = o.q || 1;
+  const g = ctx.createGain();
+  const att = o.att || 0.01;
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.exponentialRampToValueAtTime(Math.max(0.0001, vol), t0 + att);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  src.connect(f); f.connect(g);
+  let node = g;
+  if (o.pan !== undefined && ctx.createStereoPanner) { const p = ctx.createStereoPanner(); p.pan.value = clamp(o.pan, -1, 1); node.connect(p); node = p; }
+  node.connect(AUDIO.sfxBus);
+  src.start(t0); src.stop(t0 + dur + 0.05);
+}
+
+/* ---------- 事件音效（§8.3 配方表） ---------- */
+const SFX = {
+  spawn(speed, x) {
+    const vol = 0.2 + 0.15 * clamp((speed - 180) / 180, 0, 1);
+    const pan = x !== undefined ? clamp((x / 1600) * 2 - 1, -1, 1) : -0.8;
+    aNoise({ key: 'spN', f0: 300, f1: 2600, dur: 0.4, vol, q: 1.2, pan, att: 0.02 });
+    aTone({ key: 'spS', type: 'sine', f0: 160, f1: 700, dur: 0.3, vol: vol * 0.5, pan });
+  },
+  igniteStart() {
+    aTone({ type: 'sine', f0: 90, f1: 45, dur: 0.2, vol: 0.35, key: 'igS' });
+    aNoise({ f0: 400, f1: 1200, dur: 0.15, vol: 0.15, key: 'igN' });
+  },
+  igniteLoop(on) {
+    if (!AUDIO.ctx || !AUDIO.igniteGain) return;
+    AUDIO.igniteGain.gain.setTargetAtTime(on && !AUDIO.muted ? 0.35 : 0, AUDIO.ctx.currentTime, 0.06);
+  },
+  fuelEmpty() { aTone({ type: 'square', f0: 220, f1: 140, dur: 0.15, vol: 0.18, key: 'fe' }); },
+  fuelReady() { aTone({ type: 'square', f0: 660, f1: 990, fSweep: 0.08, dur: 0.1, vol: 0.15, key: 'fr' }); },
+  tidal() { aTone({ type: 'sine', f0: 200, f1: 400, dur: 0.35, vol: 0.12, key: 'td' }); },
+  flyby(vol, pan) {
+    aNoise({ key: 'fb', f0: 2200, f1: 320, dur: 0.6, vol: Math.min(0.4, vol), q: 2, pan, att: 0.25 });
+  },
+  heartbeat() {
+    aTone({ type: 'sine', f0: 110, dur: 0.2, vol: 0.2, key: 'hb1' });
+    setTimeout(() => aTone({ type: 'sine', f0: 110, dur: 0.2, vol: 0.2, key: 'hb2' }), 250);
+  },
+  capture(combo) {
+    const base = 880 * Math.pow(2, Math.min(combo || 0, 7) / 12);
+    const seq = [base, base * 1.26, base * 1.5];
+    seq.forEach((f, i) => setTimeout(() => {
+      aTone({ type: 'triangle', f0: f, dur: 0.45, vol: 0.2, att: 0.012, key: 'cp' + i });
+      aTone({ type: 'sine', f0: f * 2, dur: 0.4, vol: 0.06, att: 0.012, key: 'cp2' + i });
+    }, i * 70));
+    aNoise({ f0: 4000, ftype: 'bandpass', dur: 0.05, vol: 0.08, key: 'cpT' });
+  },
+  comboBreak() { aTone({ type: 'sine', f0: 220, f1: 208, dur: 0.18, vol: 0.12, key: 'cb' }); },
+  crash(vol) {
+    const v = clamp(vol, 0.7, 0.85);
+    aNoise({ key: 'crN', f0: 7000, f1: 120, ftype: 'lowpass', dur: 0.6, vol: v, q: 0.7 });
+    aTone({ type: 'sine', f0: 110, f1: 28, dur: 0.5, vol: 0.5, key: 'crS' });
+    setTimeout(() => aNoise({ f0: 3000, ftype: 'highpass', dur: 0.4, vol: 0.15, key: 'crT' }), 150);
+  },
+  swallow() {
+    aTone({ type: 'sine', f0: 110, f1: 24, dur: 0.6, vol: 0.6, key: 'swS' });
+    aNoise({ f0: 3000, f1: 80, ftype: 'lowpass', dur: 0.7, vol: 0.35, q: 0.5, key: 'swN' });
+  },
+  lost() { aTone({ type: 'triangle', f0: 400, f1: 120, dur: 0.35, vol: 0.2, key: 'lo' }); },
+  levelClear() {
+    const seq = [880, 1108.73, 1318.51, 1760];
+    seq.forEach((f, i) => setTimeout(() => aTone({ type: 'triangle', f0: f, dur: 0.6, vol: 0.22, att: 0.01, key: 'lc' + i }), i * 80));
+    aNoise({ f0: 900, f1: 120, ftype: 'lowpass', dur: 0.5, vol: 0.3, key: 'lcN' });
+  },
+  rankStamp(n) {
+    aTone({ type: 'square', f0: 660 * Math.pow(2, (2 * n) / 12), dur: 0.12, vol: 0.2, key: 'rs' });
+  },
+  sRank() {
+    SFX.levelClear();
+    setTimeout(() => aTone({ type: 'triangle', f0: 1975.5, dur: 0.5, vol: 0.26, key: 'sr' }), 350);
+  },
+  ui(kind) {
+    if (kind === 'hover') aTone({ type: 'square', f0: 660, dur: 0.08, vol: 0.08, key: 'uiH' });
+    else aTone({ type: 'square', f0: 440, f1: 660, fSweep: 0.06, dur: 0.08, vol: 0.1, key: 'uiC' });
+  },
+  milestone() {
+    aTone({ type: 'triangle', f0: 660, dur: 0.4, vol: 0.15, key: 'ms1' });
+    setTimeout(() => aTone({ type: 'triangle', f0: 880, dur: 0.4, vol: 0.15, key: 'ms2' }), 60);
+  },
+  warp() { aNoise({ f0: 300, f1: 1800, dur: 0.5, vol: 0.25, q: 1.5, key: 'wp' }); setTimeout(() => aNoise({ f0: 1800, f1: 300, dur: 0.3, vol: 0.15, q: 1.5, key: 'wp2' }), 200); },
+  comboUp(n) {
+    aTone({ type: 'square', f0: 440 * Math.pow(2, ((n / 5) * 2) / 12), dur: 0.07, vol: 0.12, key: 'cu' });
+  },
+};
+
+/* ---------- 环境垫 A（§8.4） ---------- */
+function startAmbPad() {
+  const ctx = AUDIO.ctx;
+  if (!ctx) return;
+  // Convolver IR：2.5s 立体声指数衰减噪声
+  const irLen = Math.floor(ctx.sampleRate * 2.5);
+  const ir = ctx.createBuffer(2, irLen, ctx.sampleRate);
+  for (let ch = 0; ch < 2; ch++) {
+    const d = ir.getChannelData(ch);
+    for (let i = 0; i < irLen; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / irLen, 3);
+  }
+  const conv = ctx.createConvolver(); conv.buffer = ir;
+  const wet = ctx.createGain(); wet.gain.value = 0.4;
+  const dry = ctx.createGain(); dry.gain.value = 0.6;
+  conv.connect(wet);
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 500; lp.Q.value = 0.7;
+  const lfo1 = ctx.createOscillator(); lfo1.frequency.value = 0.05;
+  const lfo1g = ctx.createGain(); lfo1g.gain.value = 350;
+  lfo1.connect(lfo1g); lfo1g.connect(lp.frequency); lfo1.start();
+  const specs = [
+    { type: 'triangle', f: 55, vol: 0.05, det: 0 },
+    { type: 'sawtooth', f: 110, vol: 0.03, det: -7 },
+    { type: 'sawtooth', f: 164.81, vol: 0.02, det: 9 },
+  ];
+  const lfo2 = ctx.createOscillator(); lfo2.frequency.value = 0.08;
+  const lfo2g = ctx.createGain(); lfo2g.gain.value = 5;
+  lfo2.connect(lfo2g); lfo2.start();
+  for (const sp of specs) {
+    const o = ctx.createOscillator(); o.type = sp.type; o.frequency.value = sp.f; o.detune.value = sp.det;
+    if (sp.f > 160) lfo2g.connect(o.detune);
+    const g = ctx.createGain(); g.gain.value = sp.vol;
+    o.connect(g); g.connect(lp); g.connect(dry); o.start();
+  }
+  lp.connect(conv);
+  wet.connect(AUDIO.ambBus); dry.connect(AUDIO.ambBus);
+}
+
+function startBrownPad() {
+  const ctx = AUDIO.ctx;
+  if (!ctx) return;
+  const src = ctx.createBufferSource(); src.buffer = AUDIO.brownBuf; src.loop = true;
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 220;
+  const g = ctx.createGain(); g.gain.value = 0.0;
+  src.connect(lp); lp.connect(g); g.connect(AUDIO.ambBus);
+  src.start();
+  g.gain.setTargetAtTime(0.03 * 0.55, ctx.currentTime, 2);
+}
+
+function dangerPadSet(on) {
+  if (!AUDIO.ctx || !AUDIO.dangerGain) return;
+  AUDIO.dangerGain.gain.setTargetAtTime(on ? 0.12 : 0, AUDIO.ctx.currentTime, on ? 0.5 : 0.4);
+}
+
+/* ---------- 护送音乐循环（§8.5，A 小调五声 90BPM 32 步） ---------- */
+const MUSIC_PATTERN = [440, 523.25, 659.25, 587.33, 440, 523.25, 392, 659.25];
+function musicStart() {
+  if (!AUDIO.ctx || AUDIO.musicTimer) return;
+  AUDIO.musicStep = 0;
+  AUDIO.musicNext = AUDIO.ctx.currentTime + 0.1;
+  AUDIO.musicTimer = setInterval(musicTick, 25);
+}
+function musicStop() {
+  if (AUDIO.musicTimer) { clearInterval(AUDIO.musicTimer); AUDIO.musicTimer = null; }
+}
+function musicTick() {
+  const ctx = AUDIO.ctx;
+  if (!ctx || AUDIO.muted || !SETTINGS.music) {
+    // 静音/关乐期间快进时钟，恢复时不补排（防 N 秒音符齐鸣）
+    if (ctx) AUDIO.musicNext = ctx.currentTime + 0.1;
+    return;
+  }
+  const STEP = 60 / 90 / 4;
+  while (AUDIO.musicNext < ctx.currentTime + 0.12) {
+    const s = AUDIO.musicStep % 32;
+    const t0 = AUDIO.musicNext;
+    const mk = (type, f, vol, dec, lpF) => {
+      const o = ctx.createOscillator(); o.type = type; o.frequency.value = f;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(vol, t0 + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dec);
+      let node = o; o.connect(g); node = g;
+      if (lpF) { const f2 = ctx.createBiquadFilter(); f2.type = 'lowpass'; f2.frequency.value = lpF; node.connect(f2); node = f2; }
+      node.connect(AUDIO.ambBus);
+      o.start(t0); o.stop(t0 + dec + 0.05);
+    };
+    if (s % 8 === 0) mk('triangle', 110, 0.06, 0.5, 800);
+    const comboBoost = GAME.daily && GAME.daily.combo >= 3 ? 1.3 : 1;
+    mk('triangle', MUSIC_PATTERN[s % 8], 0.045 * comboBoost, 0.28, 1200);
+    if (s === 28) mk('sine', 1318.5, 0.02, 0.4);
+    if (s % 2 === 0) aNoiseTick(t0);
+    AUDIO.musicNext += STEP;
+    AUDIO.musicStep++;
+  }
+}
+function aNoiseTick(t0) {
+  const ctx = AUDIO.ctx;
+  const src = ctx.createBufferSource(); src.buffer = AUDIO.noiseBuf;
+  const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 6000;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.015, t0);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.02);
+  src.connect(hp); hp.connect(g); g.connect(AUDIO.ambBus);
+  src.start(t0); src.stop(t0 + 0.03);
+}
+
+/* ---------- 生命周期 ---------- */
+function audioVisibility(visible) {
+  if (!AUDIO.ctx) return;
+  if (visible) { if (!AUDIO.muted) AUDIO.ctx.resume().catch(() => {}); }
+  else AUDIO.ctx.suspend().catch(() => {});
+}
+
+
+/* ============================================================
+ * 牵星 QIANXING · 07_game.js
+ * 玩法编排：关卡装载 / 事件→演出映射 / 预测线 / 计分 /
+ * 星尘层与星座卡 / 死因归因 / 教学与提示 / 遥测
+ * ============================================================ */
+'use strict';
+
+const GAME = {
+  mode: 'campaign',            // campaign | daily
+  W: null,
+  levelSprites: [], wormholeSprite: null,
+  trail: [], strokePath: [], failTrails: [], stardust: null, stardustCtx: null, stardustCount: 0,
+  predPts: null, predEnd: 'fly', predEndT: 0,
+  padFlash: 0, targetFlash: 0,
+  starFlash: null, flybyCd: null, grazeTimes: [],
+  deathCount: 0, solutionHint: null,
+  input: { x: 0, y: 0, hold: false, skip: false, active: false },
+  idleT: 0, idleShown: 0,
+  captureAnim: null,           // {x,y,t} 交付螺旋
+  resultData: null,
+  lastDeath: null,
+  nearFails: {}, totalFails: {}, // 近失率遥测（按关）
+  daily: null,
+  tutorialText: null, tutorialT: 0,
+  attemptSession: 0,
+};
+
+const BODY_NAMES = { planet: '行星', moon: '卫星', star: '恒星', blackhole: '黑洞', repulsor: '斥力星' };
+
+/* ---------- 关卡装载 ---------- */
+function loadLevel(id, isBg) {
+  const L = LEVEL_INDEX[id];
+  if (!L) return false;
+  const v = validateLevel(L);
+  if (v.errs.length) { console.error('level.invalid', id, v.errs); return false; }
+  for (const w of v.warns) console.warn('[qianxing]', id, w);
+  GAME.W = makeWorld(L, {});
+  bakeLevelSprites(L);
+  resetLevelVisualState(L, isBg);
+  GAME.resultData = null;
+  // per 关重烘背景（星云随关卡变化；glow/黑洞套件复用）
+  bakeBackground((hashId(L.id) % 100000) * 31 + 1);
+  SAVE.stats.attempts = SAVE.stats.attempts || 0;
+  return true;
+}
+
+function bakeLevelSprites(L) {
+  GAME.levelSprites = L.bodies.map((b, i) => {
+    const seed = 1000 + hashId(L.id) * 7 + i;
+    if (b.type === 'star') return bakeStarBody(b.r, seed);
+    if (b.type === 'repulsor') return bakeRepulsor(b.r, seed);
+    if (b.type === 'blackhole') return bakeTerrainBH(b.r, seed);
+    // planet/moon：hue 微调（±30）
+    const ramp = { light: hueShift(BODY_RAMP.iceP.light, clamp(b.hue - 215, -30, 30)), base: hueShift(BODY_RAMP.iceP.base, clamp(b.hue - 215, -30, 30)), dark: BODY_RAMP.iceP.dark, atmo: BODY_RAMP.iceP.atmo };
+    if (b.type === 'planet' && b.hue < 100) {
+      ramp.light = hueShift(BODY_RAMP.gas.light, clamp(b.hue - 35, -30, 30));
+      ramp.base = hueShift(BODY_RAMP.gas.base, clamp(b.hue - 35, -30, 30));
+      ramp.atmo = BODY_RAMP.gas.atmo;
+    }
+    return bakePlanet(b.r, ramp, seed);
+  });
+  GAME.wormholeSprite = bakeWormhole(L.target.r);
+}
+
+function resetLevelVisualState(L, isBg) {
+  fxReset();
+  GAME.trail = []; GAME.strokePath = []; GAME.failTrails = [];
+  GAME.stardust = mkCanvas(1760, 1060);
+  GAME.stardustCtx = GAME.stardust.getContext('2d');
+  GAME.stardustCount = 0;
+  GAME.predPts = null;
+  GAME.deathCount = 0; GAME.solutionHint = null;
+  GAME.idleT = 0; GAME.idleShown = 0;
+  GAME.captureAnim = null;
+  GAME.resultDelay = 0;
+  if (typeof clearGameInput === "function") clearGameInput();
+  GAME.lastDeath = null;
+  GAME.padFlash = 0; GAME.targetFlash = 0;
+  GAME.starFlash = L.bodies.map(() => 0);
+  GAME.flybyCd = L.bodies.map(() => 0);
+  GAME.grazeTimes = [];
+  const park = parkOf(L);
+  GAME.input.x = park.x; GAME.input.y = park.y;
+  // 教学（首次进入机制关；标题背景加载不消耗教学标记）
+  const tut = {
+    'c1-l1': '移动光标，把黑洞放到船前方——引力会替你掌舵',
+    'c1-l2': '红色恒星是死地——借它的弯，别贴它的脸',
+    'c1-l3': '鼠标按住 / 触屏按点火：引力 ×2.2，燃料 1.2 秒',
+  };
+  const flagKey = 'tut_' + L.id;
+  if (!isBg && tut[L.id] && !SAVE.flags[flagKey]) {
+    GAME.tutorialText = tut[L.id];
+    GAME.tutorialT = 2.4;
+    SAVE.flags[flagKey] = true; saveSoon();
+  } else GAME.tutorialText = null;
+}
+
+function hashId(id) {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
+  return Math.abs(h) % 100000;
+}
+
+// Use simulation time, retain the whole stroke rather than only its tail.
+function sampleStrokePath(W) {
+  const path = GAME.strokePath, last = path[path.length - 1];
+  if (W.ship && (!last || W.t - last.t >= 0.05)) {
+    path.push({ x: W.ship.x, y: W.ship.y, t: W.t });
+    if (path.length > 512) path.splice(1, 1);
+  }
+}
+
+/* ---------- 每帧驱动 ---------- */
+function gameFrame(dtRaw) {
+  const W = GAME.W;
+  if (!W) return;
+  // 预测线（逐帧重算）
+  if (UI.state === 'playing' && (W.phase === 'flight' || W.phase === 'charge')) {
+    const pr = predictPath(W, GAME.input.hold && W.bh.wake);
+    GAME.predPts = pr.pts; GAME.predEnd = pr.end; GAME.predEndT = pr.endT || 0;
+  } else GAME.predPts = null;
+
+  // 拖尾采样
+  if (W.ship) {
+    GAME.trail.push({ x: W.ship.x, y: W.ship.y });
+    if (GAME.trail.length > 14) GAME.trail.shift();
+    sampleStrokePath(W);
+  }
+  // 潮汐拉伸
+  if (W.ship) {
+    const d = Math.hypot(W.ship.x - W.bh.x, W.ship.y - W.bh.y);
+    if (d < CFG.STRETCH) {
+      const target = 1 + 1.2 * clamp((CFG.STRETCH - Math.max(d, CFG.STRETCH_MIN)) / (CFG.STRETCH - CFG.STRETCH_MIN), 0, 1);
+      FX.stretch = Math.max(FX.stretch, target);
+      FX.stretchSplit = d < 25.6;
+      if (!GAME._wasTidal) { SFX.tidal(); GAME._wasTidal = true; }
+    } else if (GAME._wasTidal) {
+      GAME._wasTidal = false;
+      setTimeout(() => { FX.stretch = 1; FX.stretchSplit = false; }, 100);
+    }
+  }
+  // 点火循环音 / 恒星危险垫
+  SFX.igniteLoop(W.bh.ignite);
+  let nearStar = false;
+  if (W.ship) {
+    for (const b of W.bodies) if (b.type === 'star' && Math.hypot(b.x - W.ship.x, b.y - W.ship.y) < 200) nearStar = true;
+  }
+  dangerPadSet(nearStar);
+  // 相机（星场随黑洞缓移）
+  FX.camX += ((W.bh.x - 800) * 0.06 - FX.camX) * clamp(dtRaw * 4, 0, 1);
+  FX.camY += ((W.bh.y - 450) * 0.06 - FX.camY) * clamp(dtRaw * 4, 0, 1);
+  // 衰减计时
+  GAME.padFlash = Math.max(0, GAME.padFlash - dtRaw * 4);
+  GAME.targetFlash = Math.max(0, GAME.targetFlash - dtRaw * 2);
+  if (GAME.starFlash) for (let i = 0; i < GAME.starFlash.length; i++) GAME.starFlash[i] = Math.max(0, GAME.starFlash[i] - dtRaw);
+  // 日更补发计时（挂主循环，暂停即停——不随真实时间漏发）
+  const d = GAME.daily;
+  if (d && d.respawnT > 0) {
+    d.respawnT -= dtRaw;
+    if (d.respawnT <= 0 && W.phase === 'done') dailyNextShip();
+  }
+  if (GAME.tutorialT > 0) GAME.tutorialT -= dtRaw;
+  // 闲置提示
+  GAME.idleT += dtRaw;
+  if (GAME.resultDelay > 0) {
+    GAME.resultDelay -= dtRaw;
+    if (GAME.resultDelay <= 0 && GAME.resultData) {
+      const sc = GAME.resultData.parts;
+      UI.state = 'result'; UI.resultAnim = 0; clearGameInput();
+      SFX.levelClear(); SFX.rankStamp(sc.rating === 'S' ? 2 : sc.rating === 'A' ? 1 : 0);
+      if (sc.rating === 'S') { SFX.sRank(); fxSpawn('capture', 800, 300, 20, {}); }
+    }
+  }
+  if (d && d.finishDelay > 0) {
+    d.finishDelay -= dtRaw;
+    if (d.finishDelay <= 0) dailyFinish();
+  }
+  // Pause-aware capture effects, owned by this level session.
+  if (GAME.captureAnim) {
+    const ca = GAME.captureAnim; ca.t += dtRaw;
+    if (ca.t >= 0.25 && !ca.burst) {
+      ca.burst = true; fxFlash('#cfe9ff', 0.3, 0.12);
+      fxSpawn('capture', ca.x, ca.y, 25, {});
+      fxSpawn('plume', ca.x, ca.y, 25, {});
+      fxRing(ca.x, ca.y, { color: PAL.ok });
+    }
+  }
+  // 事件消费
+  consumeEvents(W);
+}
+
+/* ---------- 事件 → 演出/音频/玩法 ---------- */
+function consumeEvents(W) {
+  const evs = W.events;
+  if (!evs.length) return;
+  for (const ev of evs) {
+    switch (ev.t) {
+      case 'launch': {
+        GAME.trail = []; GAME.strokePath = [];
+        GAME.padFlash = 1;
+        fxSpawn('ion', ev.x, ev.y, 10, { speedMin: 120, speedMax: 260, lifeMin: 0.3, lifeMax: 0.5 });
+        fxAddTrauma(0.08);
+        SFX.spawn(W.level.launch.speed, ev.x);
+        telemetryPush({ e: 'restart', id: W.id });
+        SAVE.stats.attempts = (SAVE.stats.attempts || 0) + 1;
+        saveSoon();
+        GAME.attemptSession++;
+        if (GAME.mode === 'daily') { /* 计数在交付 */ }
+        break;
+      }
+      case 'grazeEnter': {
+        const b = W.bodies[ev.body];
+        // 演出档（两段式 §2.5 裁决 36）；ev 携带入环时船位，ship 可能已死
+        if (ev.tier === 3) {
+          fxSlowmo(0.25, 0.4); fxHitStop(0.06);
+          FX.trailGold = 0.6;
+          // 羽流：天体背船侧反向喷金
+          const ang = Math.atan2(ev.y - b.y, ev.x - b.x);
+          fxSpawn('plume', b.x + Math.cos(ang) * (b.r + 4), b.y + Math.sin(ang) * (b.r + 4), 10,
+            { angle: ang, spread: 1.2, speedMin: 120, speedMax: 260, lifeMin: 0.3, lifeMax: 0.5 });
+        } else if (ev.tier === 2) {
+          FX.trailGold = 0.6;
+        }
+        // 恒星芒刺闪 + danger 火花（§9 条目 16）
+        if (b.type === 'star' && GAME.starFlash) GAME.starFlash[ev.body] = 0.25;
+        if (ev.tier >= 2) fxSpawn('ion', ev.x, ev.y, 4, { sz: 2, speedMin: 80, speedMax: 200 });
+        // 掠过多普勒音（每对 0.8s 冷却）
+        const nowT = W.t;
+        if (GAME.flybyCd && (!GAME.flybyCd[ev.body] || nowT >= GAME.flybyCd[ev.body])) {
+          GAME.flybyCd[ev.body] = nowT + 0.8;
+          const d = Math.hypot(ev.x - b.x, ev.y - b.y);
+          SFX.flyby(0.45 * clamp(1 - d / 240, 0, 1), clamp((b.x - 800) / 800, -1, 1));
+        }
+        // 连续险情（4s 内第 3 次掠过，§9 条目 18）
+        GAME.grazeTimes.push(nowT);
+        GAME.grazeTimes = GAME.grazeTimes.filter(t2 => nowT - t2 <= 4);
+        if (GAME.grazeTimes.length === 3) {
+          fxText(ev.x, ev.y - 30, '险!', PAL.danger, { big: true, life: 0.8 });
+          SFX.comboUp(3);
+          GAME.grazeTimes = [];
+        }
+        break;
+      }
+      case 'slingshot': {
+        fxSpawn('plume', ev.x, ev.y, 5, { sz: 2, lifeMin: 0.2, lifeMax: 0.4 });
+        fxText(ev.x, ev.y - 20, '+速度', PAL.gold, { life: 0.7 });
+        SFX.comboUp(1);
+        break;
+      }
+      case 'grazeTier': {
+        const pts = ev.tier === 3 ? 500 : ev.tier === 2 ? 250 : 100;
+        const b = W.bodies[ev.body];
+        fxText(b.x, b.y - b.r - 14, '+' + pts, ev.tier === 3 ? PAL.gold : PAL.amberHi, { big: ev.tier === 3 });
+        break;
+      }
+      case 'igniteOn': SFX.igniteStart(); break;
+      case 'fuelEmpty': SFX.fuelEmpty(); FX.fuelBlink = 0.8; break;
+      case 'fuelFull': SFX.fuelReady(); break;
+      case 'dead': onDeath(W, ev); break;
+      case 'deliver': onDeliver(W, ev); break;
+      default: break;
+    }
+  }
+  evs.length = 0;
+}
+
+function onDeath(W, ev) {
+  const cause = ev.cause;
+  GAME.deathCount++;
+  const id = W.id;
+  GAME.totalFails[id] = (GAME.totalFails[id] || 0) + 1;
+  const nearMiss = isFinite(ev.nearMiss) && ev.nearMiss < CFG.NEAR_MISS * W.target.r;
+  if (nearMiss) GAME.nearFails[id] = (GAME.nearFails[id] || 0) + 1;
+  telemetryPush({ e: 'die', id: W.id, near: nearMiss });
+
+  // 失败轨迹沉淀（§7.10）
+  const path = GAME.strokePath.slice();
+  if (path.length > 1) {
+    GAME.failTrails.push(path);
+    stampStardust(path);
+  }
+  GAME.solutionHint = null;
+  if (GAME.deathCount >= 3 && GAME.lastDeath) {
+    GAME.solutionHint = [{ x: W.level.start.x, y: W.level.start.y }, { x: GAME.lastDeath.x, y: GAME.lastDeath.y }, { x: W.target.x, y: W.target.y }];
+  }
+  GAME.lastDeath = { x: ev.x, y: ev.y, cause };
+  GAME.trail = []; GAME.strokePath = [];
+
+  // 死因演出（§9 条目 20-26）
+  let text = '', color = PAL.danger;
+  if (cause === 'crash' || cause === 'eatenTerrain') {
+    const b = ev.body !== undefined ? W.bodies[ev.body] : null;
+    const d = b ? Math.max(0, Math.hypot(ev.x - b.x, ev.y - b.y) - b.r) : 0;
+    if (cause === 'eatenTerrain') {
+      text = '坠入' + (b ? BODY_NAMES[b.type] : '黑洞') + '的视界——贴着 r+18 金环外侧走';
+      SFX.swallow();
+      fxSlowmo(0.15, 0.8);
+    } else {
+      text = '坠毁（距' + (b ? BODY_NAMES[b.type] : '天体') + '面 ' + Math.round(d) + 'px）——抬高一线，或点火外推';
+      SFX.crash(0.78);
+      fxSlowmo(0.2, 0.6);
+      fxSpawn('explode', ev.x, ev.y, 34, { speedMin: 80, speedMax: 420, lifeMin: 0.3, lifeMax: 0.8 });
+      fxRing(ev.x, ev.y, {});
+    }
+    fxAddTrauma(0.55);
+    fxHitStop(0.1);
+    fxFlash('#fffaf0', 0.35, 0.12);
+    fxZoom(ev.x, ev.y, 1, 1.25, 0.6);
+    FX.vignette = 1; FX.glitchT = 0.16;
+  } else if (cause === 'eatenSelf') {
+    text = '坠入自己的视界——保持 60px 以上护航距离';
+    color = PAL.amber;
+    SFX.swallow();
+    FX.bhFlare = 1;
+    fxSlowmo(0.15, 1.0);
+    fxAddTrauma(0.4);
+    fxZoom(ev.x, ev.y, 1, 1.25, 0.8);
+  } else if (cause === 'oob') {
+    const side = ev.x > 1680 ? 'x=' + Math.round(ev.x) : ev.x < -80 ? 'x=' + Math.round(ev.x) : 'y=' + Math.round(ev.y);
+    text = '出界（' + side + '）——提前 0.3s 点火压一头';
+    SFX.lost();
+    fxSlowmo(0.2, 0.4);
+  } else if (cause === 'timeout') {
+    text = '20s 回收——黑洞放到船前方拖拽加速，别让它兜圈';
+    SFX.lost();
+  } else if (cause === 'scuttle') {
+    text = '弃船重开';
+    color = PAL.textDim;
+    fxSpawn('ion', ev.x, ev.y, 8, {});
+  }
+  // 虫洞近失（§2.4）
+  if (nearMiss) {
+    const gap = Math.max(0, Math.round(ev.nearMiss - W.target.r));
+    fxText(W.target.x, W.target.y - W.target.r - 18, '差 ' + gap + ' px 入洞', PAL.gold, { big: true, life: 1.3 });
+    fxSlowmo(0.3, 0.4); fxHitStop(0.15);
+    SFX.heartbeat();
+    GAME.targetFlash = 1;
+  } else if (isFinite(ev.nearMiss) && ev.nearMiss < CFG.NEAR_MISS_WIDE * W.target.r) {
+    GAME.targetFlash = 0.7;
+  }
+  fxText(clamp(ev.x, 100, 1500), clamp(ev.y - 40, 60, 840), text, color, { life: 1.4 });
+  // 首次坠毁零成本文案
+  if (!SAVE.flags.firstDeath) {
+    SAVE.flags.firstDeath = true; saveSoon();
+    fxText(800, 620, '引擎还在，再来', PAL.textDim, { life: 1.6 });
+  }
+  // 护送：命 -1 / combo 断
+  if (GAME.mode === 'daily') {
+    GAME.daily.lives--;
+    GAME.daily.combo = 0;
+    SFX.comboBreak();
+    if (GAME.daily.lives <= 0) {
+      GAME.daily.finishDelay = 0.9;
+    }
+  }
+}
+
+/* ---------- 星尘层（§7.10） ---------- */
+function stampStardust(path) {
+  const c = GAME.stardustCtx;
+  GAME.stardustCount++;
+  if (GAME.stardustCount > 20) {
+    // 全量重烘：清空按序淡印最近 20 条
+    c.clearRect(0, 0, 1760, 1060);
+    const keep = GAME.failTrails.slice(-20);
+    keep.forEach((p, i) => stampLine(c, p, 0.05 + 0.1 * (i / 20)));
+    GAME.stardustCount = 20;
+    return;
+  }
+  stampLine(c, path, 0.10);
+}
+function stampLine(c, path, alpha) {
+  if (path.length < 2) return;
+  c.strokeStyle = rgba('#b3244a', alpha);
+  c.lineWidth = 1.2;
+  c.beginPath();
+  c.moveTo(path[0].x + 80, path[0].y + 80);
+  for (let i = 1; i < path.length; i++) c.lineTo(path[i].x + 80, path[i].y + 80);
+  c.stroke();
+}
+
+/* ---------- 交付（§2.6/§9 条目 27-29/35-38） ---------- */
+function onDeliver(W, ev) {
+  GAME.strokePath.push({ x: ev.x, y: ev.y, t: W.t });
+  const L = W.level;
+  fxSlowmo(0.27, 0.5);
+  fxHitStop(0.06);
+  fxAddTrauma(0.6);
+  GAME.captureAnim = { x: ev.x, y: ev.y, t: 0, sx: W.ship ? W.ship.x : ev.x, sy: W.ship ? W.ship.y : ev.y };
+  W.ship = null;
+  SFX.capture(GAME.mode === 'daily' ? GAME.daily.combo : 0);
+
+
+  if (GAME.mode === 'daily') { dailyOnDeliver(); return; }
+
+  // 计分
+  const gr = computeGrazePts(W);
+  const noIgnite = !W.levelIgnited;
+  const timeOk = W.t <= L.parTime;
+  const sc = scoreParts(W.strokes, L.par, gr.total, noIgnite, timeOk);
+  // 零点火星（§9 条目 38）
+  if (noIgnite) {
+    fxSpawn('ion', W.target.x, W.target.y, 18, {});
+    fxText(W.target.x, W.target.y - 40, '零点火', PAL.ice, { big: true, life: 1.2 });
+  }
+  const prev = SAVE.best[L.id];
+  const isBest = !prev || sc.total > prev.score;
+  if (isBest) {
+    SAVE.best[L.id] = { score: sc.total, rating: sc.rating, strokes: W.strokes, grazePts: gr.total, timeSec: Math.round(W.t * 10) / 10, attempts: (prev ? prev.attempts : 0) + GAME.attemptSession };
+  } else if (prev) {
+    prev.attempts += GAME.attemptSession;
+  }
+  const idx = LEVEL_ORDER.indexOf(L.id);
+  SAVE.unlocked = Math.max(SAVE.unlocked, Math.min(30, idx + 2));
+  SAVE.stats.deliveries = (SAVE.stats.deliveries || 0) + 1;
+  if (gr.per.some(g => g.tier === 3)) SAVE.stats.grazeT3 = (SAVE.stats.grazeT3 || 0) + 1;
+  saveSoon();
+  telemetryPush({ e: 'deliver', id: L.id });
+
+  GAME.resultData = {
+    id: L.id, name: L.name, par: L.par, strokes: W.strokes, time: W.t, parTime: L.parTime,
+    parts: sc, grazePer: gr.per, isBest,
+    deliveredPath: GAME.strokePath.slice(),
+  };
+  GAME.attemptSession = 0;
+  GAME.resultDelay = 0.9;
+}
+
+/* ---------- 星座卡（§7.10） ---------- */
+function buildConstellation() {
+  const rd = GAME.resultData;
+  if (!rd) return null;
+  const c = mkCanvas(1600, 900), g = c.getContext('2d');
+  g.drawImage(S.bg, -80, -80, 1760, 1060);
+  if (GAME.stardust) g.drawImage(GAME.stardust, -80, -80, 1760, 1060);
+  // 动态 3 条
+  const alphas = [0.3, 0.2, 0.12];
+  for (let i = 0; i < Math.min(3, GAME.failTrails.length); i++) {
+    const tr = GAME.failTrails[GAME.failTrails.length - 1 - i];
+    g.strokeStyle = rgba('#57617f', alphas[i]);
+    g.lineWidth = 1.5 - i * 0.5;
+    g.beginPath(); g.moveTo(tr[0].x, tr[0].y);
+    for (const p of tr) g.lineTo(p.x, p.y);
+    g.stroke();
+  }
+  // 交付航线（amber 描线）
+  g.strokeStyle = PAL.amber; g.lineWidth = 2;
+  g.beginPath();
+  const dp = rd.deliveredPath.length ? rd.deliveredPath : [{ x: GAME.W.level.start.x, y: GAME.W.level.start.y }];
+  g.moveTo(dp[0].x, dp[0].y);
+  for (const p of dp) g.lineTo(p.x, p.y);
+  g.stroke();
+  // 起终点四角星标
+  drawStarMark(g, GAME.W.level.start.x, GAME.W.level.start.y, PAL.ice);
+  drawStarMark(g, GAME.W.target.x, GAME.W.target.y, PAL.ok);
+  // 标题
+  g.font = '600 34px "Segoe UI","Microsoft YaHei",sans-serif';
+  g.textAlign = 'center';
+  g.fillStyle = PAL.text;
+  g.strokeStyle = 'rgba(4,6,13,0.8)'; g.lineWidth = 6;
+  const title = rd.id + ' · ' + rd.name + '座 · ' + rd.parts.rating;
+  g.strokeText(title, 800, 60);
+  g.fillText(title, 800, 60);
+  return c;
+}
+function drawStarMark(g, x, y, col) {
+  g.save(); g.translate(x, y); g.rotate(Math.PI / 4);
+  g.fillStyle = col;
+  g.fillRect(-6, -1.5, 12, 3); g.fillRect(-1.5, -6, 3, 12);
+  g.restore();
+}
+function saveConstellationPNG() {
+  const c = buildConstellation();
+  if (!c) return;
+  c.toBlob((blob) => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'qianxing-' + GAME.resultData.id + '.png';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    toast('星座卡已保存');
+  }, 'image/png');
+}
+
+/* ---------- HUD（屏幕空间） ---------- */
+function drawHUD(g) {
+  const W = GAME.W;
+  if (!W || (UI.state !== 'playing' && UI.state !== 'result' && UI.state !== 'paused')) return;
+  const pad = 14, fs = clamp(V.h * 0.024, 13, 18);
+  g.textAlign = 'left';
+  g.font = '600 ' + fs + 'px "Segoe UI","Microsoft YaHei",sans-serif';
+  // 左上：杆数
+  g.fillStyle = PAL.textDim;
+  if (GAME.mode === 'campaign') g.fillText('第 ' + W.strokes + ' 杆', pad, pad + fs);
+  g.fillStyle = PAL.textFaint;
+  g.font = '400 ' + (fs * 0.78) + 'px "Segoe UI","Microsoft YaHei",sans-serif';
+  if (GAME.mode === 'campaign') {
+    g.fillText('尝试 ' + ((SAVE.best[W.id] ? SAVE.best[W.id].attempts : 0)), pad, pad + fs * 2.1);
+  }
+  // 顶中：计时 / parTime
+  g.textAlign = 'center';
+  const over = W.t > W.level.parTime;
+  g.fillStyle = over ? PAL.danger : PAL.textDim;
+  g.font = '600 ' + fs + 'px "Segoe UI","Microsoft YaHei",sans-serif';
+  g.fillText((GAME.mode === 'daily' ? '' : W.t.toFixed(1) + 's / ' + W.level.parTime + 's'), V.w / 2, pad + fs);
+  // 右上：杆 k / par
+  if (GAME.mode === 'campaign') {
+    g.textAlign = 'right';
+    g.fillStyle = PAL.text;
+    g.fillText('杆 ' + W.strokes + ' / par ' + W.level.par, V.w - pad - 44, pad + fs);
+  }
+  // 护送 HUD
+  if (GAME.mode === 'daily') drawDailyHUD(g, pad, fs);
+  // 闲置提示（8s 无输入，阶梯 8/16/32s）
+  if (GAME.idleT > 8 * Math.pow(2, GAME.idleShown) && GAME.idleShown < 3 && W.phase !== 'done') {
+    const a = 0.5 + 0.3 * Math.sin(V.t * 6);
+    g.textAlign = 'center';
+    g.globalAlpha = a;
+    g.fillStyle = PAL.ice;
+    g.font = '500 ' + fs * 1.05 + 'px "Segoe UI","Microsoft YaHei",sans-serif';
+    g.fillText(W.level.hint, V.w / 2, V.h - 46);
+    g.globalAlpha = 1;
+    GAME.idleShown++;
+    GAME.idleT = 0;
+  }
+  // 教学浮层
+  if (GAME.tutorialText && GAME.tutorialT > 0) {
+    const a = clamp(GAME.tutorialT / 0.4, 0, 1);
+    g.globalAlpha = Math.min(1, a);
+    g.textAlign = 'center';
+    g.fillStyle = PAL.amberHi;
+    g.font = '600 ' + fs * 1.15 + 'px "Segoe UI","Microsoft YaHei",sans-serif';
+    g.fillText(GAME.tutorialText, V.w / 2, V.h * 0.2);
+    g.globalAlpha = 1;
+  }
+  // 死因归因（lost 态，§2.4 三件套）
+  if (W.phase === 'lost' && GAME.lastDeath && W.deadCause && W.deadCause.type !== 'scuttle') {
+    const d = GAME.lastDeath;
+    const x = wx(d.x), y = wy(d.y);
+    g.strokeStyle = '#FF5A5A';
+    g.lineWidth = 2;
+    const s = 12;
+    g.beginPath();
+    g.moveTo(x - s, y); g.lineTo(x - s * 0.4, y); g.moveTo(x + s * 0.4, y); g.lineTo(x + s, y);
+    g.moveTo(x, y - s); g.lineTo(x, y - s * 0.4); g.moveTo(x, y + s * 0.4); g.lineTo(x, y + s);
+    g.stroke();
+    g.beginPath(); g.arc(x, y, s * 0.7, 0, TAU); g.stroke();
+  }
+  // 交付螺旋（捕获演出 §7.7）
+  if (GAME.captureAnim) {
+    const ca = GAME.captureAnim;
+    const t = clamp(ca.t / 0.25, 0, 1);
+    if (t < 1) {
+      const ang = t * TAU;
+      const rr = (GAME.W.target.r * 0.8) * (1 - t);
+      const x = wx(GAME.W.target.x + Math.cos(ang) * rr), y = wy(GAME.W.target.y + Math.sin(ang) * rr);
+      const sz = 28 * V.scale * (1 - t * 0.8);
+      g.save();
+      g.translate(x, y); g.rotate(ang);
+      g.drawImage(S.ship, -sz / 2, -sz / 2, sz, sz);
+      g.restore();
+    }
+  }
+}
+
+/* ---------- 遥测（§6.5） ---------- */
+function telemetryPush(ev) {
+  try {
+    ev.ts = Date.now();
+    const ring = JSON.parse(localStorage.getItem('qianxing.ev') || '[]');
+    ring.push(ev);
+    while (ring.length > 200) ring.shift();
+    localStorage.setItem('qianxing.ev', JSON.stringify(ring));
+  } catch (e) { void e; }
+}
+window.__loopStats = function () {
+  let ring = [];
+  try { ring = JSON.parse(localStorage.getItem('qianxing.ev') || '[]'); } catch (e) { void e; }
+  const dies = ring.filter(e => e.e === 'die');
+  const restarts = ring.filter(e => e.e === 'restart');
+  const nearF = dies.filter(e => e.near).length;
+  const sessionDeliveries = ring.filter(e => e.e === 'deliver').length;
+  // 中位 die→restart 延迟
+  const delays = [];
+  for (let i = 0; i < ring.length; i++) {
+    if (ring[i].e === 'die') {
+      const next = ring.slice(i + 1).find(e => e.e === 'restart');
+      if (next) delays.push((next.ts - ring[i].ts) / 1000);
+    }
+  }
+  delays.sort((a, b) => a - b);
+  const median = delays.length ? delays[Math.floor(delays.length / 2)] : -1;
+  const perLevel = {};
+  for (const d of dies) {
+    perLevel[d.id] = perLevel[d.id] || { fails: 0, near: 0 };
+    perLevel[d.id].fails++;
+    if (d.near) perLevel[d.id].near++;
+  }
+  const nearRate = {};
+  for (const k in perLevel) nearRate[k] = perLevel[k].fails ? perLevel[k].near / perLevel[k].fails : 0;
+  return {
+    medianRestartSec: median,
+    nearMissRate: dies.length ? nearF / dies.length : -1,
+    nearMissRatePerLevel: nearRate,
+    sessionDeliveries,
+    events: ring.length,
+  };
+};
+
+
+/* ============================================================
+ * 牵星 QIANXING · 08_ui.js
+ * 状态机 UI（§6）：标题/选关/暂停/结算 + 存档 + 输入路由 + iris 转场
+ * ============================================================ */
+'use strict';
+
+/* ---------- 存档（§6.4） ---------- */
+const SAVE_DEF = {
+  v: 1, unlocked: 1, best: {},
+  settings: { sfxVol: 0.8, music: true, shakeScale: 1.0, fxScale: 1.0, control: 'absolute', colorblind: false },
+  flags: {}, stats: { attempts: 0, deliveries: 0, grazeT3: 0 },
+  daily: { date: 0, bestShips: 0, lastShips: 0, lastTrail: [] },
+};
+let SAVE = JSON.parse(JSON.stringify(SAVE_DEF));
+let SETTINGS = SAVE.settings;
+let _saveTimer = null;
+function loadSave() {
+  try {
+    const raw = localStorage.getItem('qianxing.v1');
+    if (raw) {
+      const data = JSON.parse(raw);
+      if (data && data.v === 1) {
+        SAVE = Object.assign(JSON.parse(JSON.stringify(SAVE_DEF)), data);
+        SAVE.settings = Object.assign({}, SAVE_DEF.settings, data.settings || {});
+        SAVE.stats = Object.assign({}, SAVE_DEF.stats, data.stats || {});
+        SAVE.daily = Object.assign({}, SAVE_DEF.daily, data.daily || {});
+        SETTINGS = SAVE.settings;
+      }
+    }
+  } catch (e) { void e; }
+}
+function saveSoon() {
+  if (_saveTimer) clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(flushSave, 250);
+}
+function flushSave() {
+  try { localStorage.setItem('qianxing.v1', JSON.stringify(SAVE)); } catch (e) { void e; }
+}
+
+/* ---------- UI 状态机 ---------- */
+const UI = {
+  state: 'title',            // title | select | playing | paused | result
+  buttons: [],
+  resultAnim: 0, resultLastT: 0,
+  trans: null,               // iris 转场 {t, dur, cb, done}
+  hover: null,
+  allClear: false,
+  dailyResult: null,
+};
+
+function toast(msg) {
+  UI.toastMsg = msg; UI.toastT = 1.6;
+}
+
+/* 暂停时停掉持续型音频（点火循环/危险垫）——恢复后由 gameFrame 按实时状态重驱 */
+function pauseAudioLoops() {
+  SFX.igniteLoop(false);
+  dangerPadSet(false);
+}
+
+function enterPaused() {
+  if (UI.state !== 'playing') return;
+  UI.state = 'paused';
+  clearGameInput();
+  flushSave();
+  pauseAudioLoops();
+}
+
+/* ---------- iris 转场（§9 条目 42） ---------- */
+function transitionTo(cb) {
+  if (UI.trans) return;
+  SFX.warp();
+  UI.trans = { t: 0, dur: 0.45, cb, fired: false };
+}
+
+/* ---------- 按钮系统 ---------- */
+function button(g, x, y, w, h, label, cb, opts) {
+  opts = opts || {};
+  const hov = UI.hover && UI.hover.x >= x && UI.hover.x <= x + w && UI.hover.y >= y && UI.hover.y <= y + h;
+  const base = hov ? rgba(PAL.ice, 0.16) : 'rgba(20,30,55,0.75)';
+  g.fillStyle = opts.primary ? rgba(PAL.ice, hov ? 0.25 : 0.14) : base;
+  g.strokeStyle = hov ? PAL.ice : 'rgba(143,227,255,0.35)';
+  g.lineWidth = 1.2;
+  roundRect(g, x, y, w, h, 8);
+  g.fill(); g.stroke();
+  g.fillStyle = opts.primary ? PAL.text : hov ? PAL.ice : PAL.textDim;
+  g.font = (opts.big ? '700 ' : '600 ') + (opts.fs || 16) + 'px "Segoe UI","Microsoft YaHei",sans-serif';
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(label, x + w / 2, y + h / 2 + 1);
+  g.textBaseline = 'alphabetic';
+  UI.buttons.push({ x, y, w, h, cb, disabled: opts.disabled });
+  return hov;
+}
+function roundRect(g, x, y, w, h, r) {
+  g.beginPath();
+  g.moveTo(x + r, y);
+  g.arcTo(x + w, y, x + w, y + h, r);
+  g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r);
+  g.arcTo(x, y, x + w, y, r);
+  g.closePath();
+}
+
+/* ---------- 各屏绘制 ---------- */
+UI.draw = function (g, dt = 1 / 60) {
+  UI.frameDt = dt;
+  UI.buttons = [];
+  if (UI.toastT > 0) {
+    UI.toastT -= 1 / 60;
+    g.globalAlpha = clamp(UI.toastT, 0, 1);
+    g.fillStyle = 'rgba(10,15,31,0.9)';
+    const tw = 240;
+    roundRect(g, V.w / 2 - tw / 2, V.h - 80, tw, 36, 8);
+    g.fill();
+    g.fillStyle = PAL.text;
+    g.font = '500 14px "Segoe UI","Microsoft YaHei",sans-serif';
+    g.textAlign = 'center';
+    g.fillText(UI.toastMsg || '', V.w / 2, V.h - 57);
+    g.globalAlpha = 1;
+  }
+  if (UI.state === 'title') drawTitle(g);
+  else if (UI.state === 'select') drawSelect(g);
+  else if (UI.state === 'paused') drawPaused(g);
+  else if (UI.state === 'result') drawResult(g);
+  drawTouchControls(g);
+  drawMuteButton(g);
+  drawIris(g);
+};
+
+function drawTitle(g) {
+  // 标题叠加在实时场景上（§6.1）
+  g.fillStyle = 'rgba(4,6,13,0.55)';
+  g.fillRect(0, 0, V.w, V.h);
+  const cx = V.w / 2;
+  g.textAlign = 'center';
+  const titleY = V.h * 0.3 + Math.sin(V.t * 1.2) * 4;
+  g.font = '700 ' + clamp(V.h * 0.11, 56, 96) + 'px "Segoe UI","Microsoft YaHei",sans-serif';
+  g.fillStyle = PAL.amberHi;
+  g.shadowColor = PAL.amber; g.shadowBlur = 24;
+  g.fillText('牵 星', cx, titleY);
+  g.shadowBlur = 0;
+  g.font = '300 ' + clamp(V.h * 0.02, 14, 20) + 'px "Segoe UI",sans-serif';
+  g.fillStyle = PAL.textDim;
+  g.fillText('Q I A N X I N G', cx, titleY + 34);
+  g.font = '500 ' + clamp(V.h * 0.024, 15, 21) + 'px "Segoe UI","Microsoft YaHei",sans-serif';
+  g.fillStyle = PAL.ice;
+  g.fillText('你不发射飞船——你就是引力', cx, titleY + 76);
+  const bw = Math.min(260, V.w * 0.4), bh = 46;
+  const hasSave = SAVE.unlocked > 1;
+  let y = V.h * 0.56;
+  button(g, cx - bw / 2, y, bw, bh, hasSave ? '启程 · 继续' : '启程', () => {
+    transitionTo(() => { startCampaign(continueLevelId()); });
+  }, { primary: true, big: true, fs: 19 });
+  y += bh + 14;
+  button(g, cx - bw / 2, y, bw, bh, '选 关', () => { UI.state = 'select'; });
+  y += bh + 14;
+  button(g, cx - bw / 2, y, bw, bh, '每日护送', () => {
+    transitionTo(() => startDaily());
+  }, { fs: 15 });
+  g.font = '400 13px "Segoe UI","Microsoft YaHei",sans-serif';
+  g.fillStyle = PAL.textFaint;
+  g.fillText('移动光标牵引 · 按住点火 · R 弃船 · Esc 暂停', cx, V.h - 40);
+  const clears = LEVEL_ORDER.every(id => SAVE.best[id]);
+  if (clears) {
+    g.fillStyle = PAL.gold;
+    g.font = '600 15px "Segoe UI","Microsoft YaHei",sans-serif';
+    g.fillText('★ 全 30 关通关 ★', cx, V.h * 0.56 - 26);
+  }
+}
+
+function drawSelect(g) {
+  g.fillStyle = 'rgba(4,6,13,0.82)';
+  g.fillRect(0, 0, V.w, V.h);
+  const cx = V.w / 2;
+  g.textAlign = 'center';
+  g.font = '700 30px "Segoe UI","Microsoft YaHei",sans-serif';
+  g.fillStyle = PAL.text;
+  g.fillText('星 图', cx, 52);
+  const gridW = Math.min(V.w * 0.92, 900);
+  const cell = gridW / 6;
+  const rows = 5;
+  const topY = 90;
+  const rowH = Math.min((V.h - topY - 90) / rows, 92);
+  for (let ch = 1; ch <= 5; ch++) {
+    const meta = CHAPTERS_META[ch - 1];
+    const y = topY + (ch - 1) * rowH;
+    g.textAlign = 'left';
+    g.font = '600 15px "Segoe UI","Microsoft YaHei",sans-serif';
+    g.fillStyle = PAL.textDim;
+    g.fillText('第' + ch + '章 ' + meta.name, cx - gridW / 2, y + 16);
+    g.font = '400 11px "Segoe UI","Microsoft YaHei",sans-serif';
+    g.fillStyle = PAL.textFaint;
+    g.fillText(meta.sub, cx - gridW / 2, y + 32);
+    for (let i = 0; i < 6; i++) {
+      const idx = (ch - 1) * 6 + i;
+      const id = LEVEL_ORDER[idx];
+      const L = LEVEL_INDEX[id];
+      const best = SAVE.best[id];
+      const unlocked = idx < SAVE.unlocked;
+      const bx = cx - gridW / 2 + i * cell + cell / 2;
+      const by = y + 52;
+      const r = Math.min(cell, rowH - 40) * 0.5 * 0.72;
+      // 连线
+      if (i < 5) {
+        g.strokeStyle = best ? rgba(PAL.ok, 0.3) : 'rgba(87,97,127,0.3)';
+        g.lineWidth = 1;
+        g.beginPath(); g.moveTo(bx + r, by); g.lineTo(bx + cell - r, by); g.stroke();
+      }
+      const hov = UI.hover && Math.hypot(UI.hover.x - bx, UI.hover.y - by) < r + 6;
+      g.beginPath(); g.arc(bx, by, r, 0, TAU);
+      if (!unlocked) {
+        g.fillStyle = 'rgba(30,38,60,0.5)';
+        g.fill();
+        g.strokeStyle = 'rgba(87,97,127,0.4)';
+        g.setLineDash([2, 3]);
+        g.stroke(); g.setLineDash([]);
+        g.fillStyle = PAL.textFaint;
+        g.font = '400 11px sans-serif';
+        g.textAlign = 'center';
+        g.fillText('🔒', bx, by + 4);
+      } else {
+        g.fillStyle = hov ? rgba(PAL.ice, 0.3) : best ? rgba(PAL.ok, 0.14) : 'rgba(143,227,255,0.08)';
+        g.fill();
+        g.strokeStyle = best ? PAL.ok : hov ? PAL.ice : 'rgba(143,227,255,0.5)';
+        g.lineWidth = hov ? 2 : 1.2;
+        g.stroke();
+        g.fillStyle = PAL.text;
+        g.font = '600 13px "Segoe UI","Microsoft YaHei",sans-serif';
+        g.textAlign = 'center';
+        g.fillText(String(i + 1), bx, by + 5);
+        if (best) {
+          const rc = best.rating === 'S' ? PAL.gold : best.rating === 'A' ? PAL.amber : PAL.ice;
+          g.fillStyle = rc;
+          g.font = '700 11px "Segoe UI","Microsoft YaHei",sans-serif';
+          g.fillText(best.rating, bx, by - r - 8);
+        }
+        UI.buttons.push({
+          x: bx - r - 4, y: by - r - 4, w: r * 2 + 8, h: r * 2 + 8,
+          cb: () => { transitionTo(() => startCampaign(id)); },
+        });
+        if (hov) {
+          g.fillStyle = PAL.text;
+          g.font = '500 13px "Segoe UI","Microsoft YaHei",sans-serif';
+          g.fillText(L.name + ' · par ' + L.par, bx, by + r + 18);
+          if (best) {
+            g.fillStyle = PAL.textDim;
+            g.font = '400 12px "Segoe UI","Microsoft YaHei",sans-serif';
+            g.fillText('最佳 ' + best.score + ' · ' + (best.attempts || 0) + ' 次尝试', bx, by + r + 36);
+          }
+        }
+      }
+    }
+  }
+  button(g, cx - 70, V.h - 58, 140, 40, '返 回', () => { UI.state = 'title'; });
+}
+
+function drawPaused(g) {
+  g.fillStyle = 'rgba(4,6,13,0.66)';
+  g.fillRect(0, 0, V.w, V.h);
+  const cx = V.w / 2;
+  g.textAlign = 'center';
+  g.font = '700 34px "Segoe UI","Microsoft YaHei",sans-serif';
+  g.fillStyle = PAL.text;
+  g.fillText('暂 停', cx, V.h * (V.h < 500 ? 0.12 : 0.3));
+  const bw = 220, bh = 44;
+  let y = V.h * (V.h < 500 ? 0.20 : 0.38);
+  button(g, cx - bw / 2, y, bw, bh, '继 续', () => { UI.state = 'playing'; }, { primary: true });
+  y += bh + 12;
+  button(g, cx - bw / 2, y, bw, bh, GAME.mode === 'daily' ? '结算收工' : '重玩本关', () => {
+    if (GAME.mode === 'daily') { transitionTo(() => dailyFinish()); }
+    else transitionTo(() => startCampaign(GAME.W.id));
+  });
+  y += bh + 12;
+  button(g, cx - bw / 2, y, bw, bh, '选 关', () => {
+    if (GAME.mode === 'daily') leaveDaily();
+    flushSave();
+    UI.state = 'select';
+  });
+  y += bh + 12;
+  button(g, cx - bw / 2, y, bw, bh, AUDIO.muted ? '声音：关' : '声音：开', () => { audioSetMuted(!AUDIO.muted); });
+  // 快捷设置
+  const sw = 104, sy = y + bh + 16;
+  const narrow = V.w < 480;
+  const sx = i => narrow ? cx - sw - 6 + (i % 2) * (sw + 12) : cx - sw * 2 - 12 + i * (sw + 8);
+  const syAt = i => sy + (narrow ? Math.floor(i / 2) * 44 : 0);
+  button(g, sx(0), syAt(0), sw, 34, SETTINGS.colorblind ? '色盲模式 开' : '色盲模式 关', () => {
+    SETTINGS.colorblind = !SETTINGS.colorblind; saveSoon();
+    bakeAll(20261024); if (GAME.W) bakeLevelSprites(GAME.W.level);
+  }, { fs: 13 });
+  button(g, sx(1), syAt(1), sw, 34, SETTINGS.shakeScale > 0 ? '震动 开' : '震动 关', () => {
+    SETTINGS.shakeScale = SETTINGS.shakeScale > 0 ? 0 : 1; saveSoon();
+  }, { fs: 13 });
+  button(g, sx(2), syAt(2), sw, 34, SETTINGS.control === 'absolute' ? '操控：悬浮' : '操控：拖拽', () => {
+    SETTINGS.control = SETTINGS.control === 'absolute' ? 'relative' : 'absolute'; saveSoon();
+  }, { fs: 13 });
+  button(g, sx(3), syAt(3), sw, 34, SETTINGS.music ? '音乐 开' : '音乐 关', () => {
+    SETTINGS.music = !SETTINGS.music; saveSoon();
+  }, { fs: 13 });
+}
+
+function drawResult(g) {
+  const rd = GAME.resultData || GAME.dailyResult;
+  if (!rd) { UI.state = 'title'; return; }
+  UI.resultAnim += 1 / 60;
+  const t = UI.resultAnim;
+  g.fillStyle = 'rgba(4,6,13,0.72)';
+  g.fillRect(0, 0, V.w, V.h);
+  const cw = Math.min(560, V.w * 0.92), chh = Math.min(560, V.h * 0.9);
+  const x0 = V.w / 2 - cw / 2, y0 = V.h / 2 - chh / 2;
+  g.fillStyle = 'rgba(10,15,31,0.92)';
+  g.strokeStyle = 'rgba(143,227,255,0.25)';
+  g.lineWidth = 1;
+  roundRect(g, x0, y0, cw, chh, 12);
+  g.fill(); g.stroke();
+  const cx = V.w / 2;
+  g.textAlign = 'center';
+  const daily = !!rd.daily;
+  // 标题
+  g.font = '600 20px "Segoe UI","Microsoft YaHei",sans-serif';
+  g.fillStyle = PAL.text;
+  g.fillText(daily ? '每日护送 #' + rd.seed + (rd.variantName ? ' · ' + rd.variantName : '') : rd.id + '「' + rd.name + '」', cx, y0 + 40);
+  if (daily) {
+    drawDailyResult(g, rd, x0, y0, cw, t);
+    return;
+  }
+  // 评级章（outBack 弹入）
+  const stampT = clamp((t - 0.15) / 0.4, 0, 1);
+  const sc = stampT > 0 ? EASE.outBack(stampT) : 0;
+  const rating = rd.parts.rating;
+  const rCol = rating === 'S' ? PAL.gold : rating === 'A' ? PAL.amber : PAL.ice;
+  g.save();
+  g.translate(cx, y0 + 108);
+  g.scale(sc, sc);
+  g.beginPath(); g.arc(0, 0, 44, 0, TAU);
+  g.strokeStyle = rCol; g.lineWidth = 3;
+  g.stroke();
+  g.fillStyle = rCol;
+  g.font = '700 40px "Segoe UI",sans-serif';
+  g.textBaseline = 'middle';
+  g.fillText(rating, 0, 2);
+  g.textBaseline = 'alphabetic';
+  if (rating === 'S') {
+    g.font = '600 14px "Segoe UI","Microsoft YaHei",sans-serif';
+    g.fillText('零点火', 0, 62);
+  }
+  g.restore();
+  // 分数滚动
+  const rollT = clamp((t - 0.3) / 0.6, 0, 1);
+  const score = Math.round(rd.parts.total * EASE.outQuad(rollT));
+  g.font = '700 46px "Segoe UI",sans-serif';
+  g.fillStyle = PAL.text;
+  g.fillText(String(score), cx, y0 + 205);
+  if (rd.isBest) {
+    g.font = '600 13px "Segoe UI","Microsoft YaHei",sans-serif';
+    g.fillStyle = PAL.gold;
+    g.fillText('★ 最佳纪录', cx, y0 + 226);
+  }
+  // 分项明细（逐行错峰 150ms）
+  const lines = [
+    ['交付基础', '+' + rd.parts.base],
+    ['省杆 ×' + Math.max(0, rd.par - rd.strokes), rd.parts.save ? '+' + rd.parts.save : '—'],
+    ['掠过得分', rd.parts.graze ? '+' + rd.parts.graze : '—'],
+    ['零点火', rd.parts.zero ? '+' + rd.parts.zero : '—'],
+    ['时限 ' + rd.time.toFixed(1) + 's/' + rd.parTime + 's', rd.parts.time ? '+' + rd.parts.time : '—'],
+  ];
+  let ly = y0 + 262;
+  g.font = '500 15px "Segoe UI","Microsoft YaHei",sans-serif';
+  lines.forEach((ln, i) => {
+    const lt = clamp((t - 0.5 - i * 0.15) / 0.2, 0, 1);
+    if (lt <= 0) return;
+    g.globalAlpha = lt;
+    g.textAlign = 'left';
+    g.fillStyle = PAL.textDim;
+    g.fillText(ln[0], x0 + 56, ly);
+    g.textAlign = 'right';
+    g.fillStyle = ln[1] === '—' ? PAL.textFaint : PAL.ice;
+    g.fillText(ln[1], x0 + cw - 56, ly);
+    g.globalAlpha = 1;
+    ly += 26;
+  });
+  // 缺口文案（蔡格尼克挂点）
+  if (t > 1.5) {
+    g.textAlign = 'center';
+    g.font = '500 13px "Segoe UI","Microsoft YaHei",sans-serif';
+    g.fillStyle = PAL.textFaint;
+    let gapTxt = '';
+    if (rating !== 'S') {
+      const need = 1800 - rd.parts.total;
+      if (need > 0) gapTxt = '距 S 还差 ' + need + ' 分（S 需 ≥1800 且全程未点火）';
+    }
+    if (!gapTxt && rating === 'B') gapTxt = '距 A 还差 ' + (1400 - rd.parts.total) + ' 分';
+    if (gapTxt) g.fillText(gapTxt, cx, ly + 6);
+  }
+  // 星座卡 + 按钮
+  const miniY = Math.min(ly + 24, y0 + chh - 150);
+  button(g, cx - 190, miniY, 180, 38, '保存星座卡 PNG', () => saveConstellationPNG(), { fs: 14 });
+  button(g, cx + 10, miniY, 180, 38, '复制战绩卡', () => {
+    const txt = '牵星 ' + rd.id + '「' + rd.name + '」 ' + rating + ' 杆' + rd.strokes + '/' + rd.par +
+      (rd.parts.graze ? ' 掠过+' + rd.parts.graze : '') + ' 用时' + rd.time.toFixed(1) + 's/' + rd.parTime + 's 尝试' + (SAVE.best[rd.id] ? SAVE.best[rd.id].attempts : rd.strokes);
+    if (navigator.clipboard) navigator.clipboard.writeText(txt).then(() => toast('战绩卡已复制'), () => toast('复制失败'));
+  }, { fs: 14 });
+  const by2 = miniY + 48;
+  const last = rd.id === 'c5-l6';
+  button(g, cx - 190, by2, 180, 42, last ? '完成全图 ★' : '下一关 →', () => {
+    if (last) { UI.allClear = true; UI.state = 'select'; return; }
+    const idx = LEVEL_ORDER.indexOf(rd.id);
+    const next = LEVEL_ORDER[Math.min(idx + 1, 29)];
+    transitionTo(() => startCampaign(next));
+  }, { primary: true });
+  button(g, cx + 10, by2, 180, 42, '重 试', () => { transitionTo(() => startCampaign(rd.id)); });
+  button(g, cx - 190, by2 + 50, 380, 34, '选 关', () => { UI.state = 'select'; }, { fs: 13 });
+}
+
+/* ---------- 静音按钮（§8.6） ---------- */
+function drawMuteButton(g) {
+  const x = V.w - 44 - 8, y = 8, s = 44;
+  const hov = UI.hover && UI.hover.x >= x && UI.hover.x <= x + s && UI.hover.y >= y && UI.hover.y <= y + s;
+  g.strokeStyle = hov ? PAL.textDim : AUDIO.muted ? PAL.textFaint : PAL.ice;
+  g.lineWidth = 1.4;
+  roundRect(g, x, y, s, s, 8);
+  g.stroke();
+  g.fillStyle = g.strokeStyle;
+  // 喇叭图形
+  const cx = x + s / 2, cy = y + s / 2;
+  g.beginPath();
+  g.moveTo(cx - 10, cy - 4); g.lineTo(cx - 4, cy - 4); g.lineTo(cx + 2, cy - 10);
+  g.lineTo(cx + 2, cy + 10); g.lineTo(cx - 4, cy + 4); g.lineTo(cx - 10, cy + 4);
+  g.closePath();
+  g.fill();
+  if (!AUDIO.muted) {
+    g.beginPath(); g.arc(cx + 4, cy, 7, -0.9, 0.9); g.stroke();
+    g.beginPath(); g.arc(cx + 4, cy, 11, -0.9, 0.9); g.stroke();
+  } else {
+    g.beginPath();
+    g.moveTo(cx + 6, cy - 8); g.lineTo(cx + 14, cy + 8);
+    g.moveTo(cx + 14, cy - 8); g.lineTo(cx + 6, cy + 8);
+    g.stroke();
+  }
+  UI.buttons.push({ x, y, w: s, h: s, cb: () => audioSetMuted(!AUDIO.muted) });
+}
+
+/* ---------- iris 转场绘制 ---------- */
+function drawIris(g) {
+  const tr = UI.trans;
+  if (!tr) return;
+  tr.t += UI.frameDt || 1 / 60;
+  const half = tr.dur;
+  const R = Math.hypot(V.w, V.h) / 2 + 40;
+  let r;
+  if (tr.t < half) {
+    r = R * (1 - EASE.inQuad(tr.t / half));
+  } else {
+    if (!tr.fired) { tr.fired = true; tr.cb && tr.cb(); }
+    r = R * EASE.outCubic(clamp((tr.t - half) / (half * 2), 0, 1));
+  }
+  if (tr.t >= half * 3) { UI.trans = null; return; }
+  let cxc = V.w / 2, cyc = V.h / 2;
+  if (GAME.W) { cxc = wx(GAME.W.target.x); cyc = wy(GAME.W.target.y); }
+  g.fillStyle = '#04060d';
+  g.beginPath();
+  g.rect(0, 0, V.w, V.h);
+  g.arc(cxc, cyc, Math.max(0, r), 0, TAU, true);
+  g.fill('evenodd');
+}
+
+/* ---------- 开局入口 ---------- */
+function continueLevelId() {
+  const unlocked = clamp(Math.floor(Number(SAVE.unlocked) || 1), 1, LEVEL_ORDER.length);
+  return LEVEL_ORDER[unlocked - 1];
+}
+function startCampaign(id) {
+  GAME.mode = 'campaign';
+  GAME.daily = null;
+  GAME.dailyGhost = null;
+  GAME.dailyResult = null;
+  musicStop();
+  if (!loadLevel(id)) { UI.state = 'title'; return; }
+  GAME.attemptSession = 0;
+  UI.state = 'playing';
+  GAME.input.hold = false;
+}
+
+/* Pointer ownership: steering and ignition can be held by separate fingers. */
+const POINTERS = { steer: null, fire: null, last: null, touch: false };
+function clearGameInput() {
+  POINTERS.steer = POINTERS.fire = POINTERS.last = null;
+  GAME.input.hold = false; GAME.input.skip = false;
+}
+function fireRect() { return { x: V.w - 120, y: V.h - 76, w: 104, h: 56 }; }
+function drawTouchControls(g) {
+  if (UI.state !== 'playing' || !(POINTERS.touch || navigator.maxTouchPoints > 0)) return;
+  const r = fireRect();
+  button(g, r.x, r.y, r.w, r.h, GAME.W && GAME.W.noIgniteMode ? '禁点火日' : GAME.input.hold ? '点火中' : '按住点火', () => {}, { primary: true, fs: 16 });
+  button(g, 16, V.h - 64, 76, 44, '暂停', enterPaused, { fs: 15 });
+}
+function setupInput(canvas) {
+  const toWorld = e => screenToWorld(e.clientX, e.clientY - (e.pointerType === 'touch' ? 70 : 0));
+  const move = e => {
+    if (SETTINGS.control === 'relative') {
+      if (POINTERS.last) {
+        GAME.input.x = clamp(GAME.input.x + (e.clientX - POINTERS.last.x) / V.scale, -80, 1680);
+        GAME.input.y = clamp(GAME.input.y + (e.clientY - POINTERS.last.y) / V.scale, -80, 980);
+      }
+      POINTERS.last = { x: e.clientX, y: e.clientY };
+    } else {
+      const w = toWorld(e); GAME.input.x = w.x; GAME.input.y = w.y;
+    }
+    GAME.idleT = 0; GAME.input.active = true;
+  };
+  window.addEventListener('pointermove', e => {
+    UI.hover = { x: e.clientX, y: e.clientY };
+    if (UI.state !== 'playing' || UI.trans) return;
+    if (e.pointerId === POINTERS.steer || (e.pointerType === 'mouse' && POINTERS.steer === null && SETTINGS.control === 'absolute')) move(e);
+  }, { passive: true });
+  window.addEventListener('pointerdown', e => {
+    audioUnlock();
+    if (UI.trans) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (e.pointerType === 'touch') POINTERS.touch = true;
+    UI.hover = { x: e.clientX, y: e.clientY };
+    const r = fireRect();
+    if (UI.state === 'playing' && e.pointerType === 'touch' && e.clientX >= r.x && e.clientX <= r.x+r.w && e.clientY >= r.y && e.clientY <= r.y+r.h) {
+      if (!(GAME.W && GAME.W.noIgniteMode) && POINTERS.fire === null) { POINTERS.fire = e.pointerId; GAME.input.hold = true; }
+      return;
+    }
+    for (const b of UI.buttons) {
+      if (e.clientX >= b.x && e.clientX <= b.x+b.w && e.clientY >= b.y && e.clientY <= b.y+b.h) {
+        if (!b.disabled) { clearGameInput(); SFX.ui('click'); b.cb(); }
+        return;
+      }
+    }
+    if (UI.state !== 'playing' || POINTERS.steer !== null) return;
+    POINTERS.steer = e.pointerId;
+    POINTERS.last = { x: e.clientX, y: e.clientY };
+    move(e);
+    GAME.input.skip = true;
+    if (e.pointerType !== 'touch') { POINTERS.fire = e.pointerId; GAME.input.hold = true; }
+  });
+  const up = e => {
+    if (e.pointerId === POINTERS.steer) { POINTERS.steer = POINTERS.last = null; GAME.input.skip = false; }
+    if (e.pointerId === POINTERS.fire) { POINTERS.fire = null; GAME.input.hold = false; }
+  };
+  window.addEventListener('pointerup', up);
+  window.addEventListener('pointercancel', up);
+  canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+  window.addEventListener('keydown', (e) => {
+    audioUnlock();
+    const k = e.key;
+    if (k === 'm' || k === 'M') { audioSetMuted(!AUDIO.muted); return; }
+    if (k === 'Escape' || k === 'p' || k === 'P') {
+      if (UI.state === 'playing') enterPaused();
+      else if (UI.state === 'paused') UI.state = 'playing';
+      else if (UI.state === 'select') UI.state = 'title';
+      else if (UI.state === 'result') UI.state = 'select';
+      return;
+    }
+    if (UI.state === 'playing') {
+      if ((k === 'r' || k === 'R') && GAME.mode === 'campaign' && GAME.W.phase === 'flight') {
+        scuttle(GAME.W);
+      }
+      if (k === ' ') { GAME.input.skip = true; e.preventDefault(); }
+      if (k === 'k' || k === 'K') {
+        SETTINGS.fxScale = SETTINGS.fxScale >= 1.5 ? 0 : SETTINGS.fxScale + 0.5;
+        toast('FX ×' + SETTINGS.fxScale);
+      }
+    } else if (UI.state === 'paused') {
+      if (k === ' ' || k === 'Enter') UI.state = 'playing';
+      if ((k === 'r' || k === 'R') && GAME.mode === 'campaign') transitionTo(() => startCampaign(GAME.W.id));
+    } else if (UI.state === 'result') {
+      if (k === ' ' || k === 'Enter') {
+        const rd = GAME.resultData;
+        if (rd) {
+          if (rd.id === 'c5-l6') { UI.state = 'select'; return; }
+          const idx = LEVEL_ORDER.indexOf(rd.id);
+          transitionTo(() => startCampaign(LEVEL_ORDER[Math.min(idx + 1, 29)]));
+        }
+      }
+      if (k === 'r' || k === 'R') {
+        const rd = GAME.resultData;
+        if (rd) transitionTo(() => startCampaign(rd.id));
+        else if (GAME.dailyResult) transitionTo(() => startDaily());
+      }
+    } else if (UI.state === 'title') {
+      if (k === ' ' || k === 'Enter') transitionTo(() => { startCampaign(continueLevelId()); });
+    }
+  });
+  window.addEventListener('keyup', (e) => { if (e.key === ' ') GAME.input.skip = false; });
+
+  // 切后台自动暂停 + flush（§6.1）
+  document.addEventListener('visibilitychange', () => {
+    audioVisibility(!document.hidden);
+    if (document.hidden) {
+      flushSave();
+      enterPaused();
+    }
+  });
+  window.addEventListener('blur', () => {
+    if (UI.state === 'playing') enterPaused();
+  });
+}
+
+
+/* ============================================================
+ * 牵星 QIANXING · 09_daily.js
+ * 日更护送模式 v1.1（§2.9）：daySeed 场地生成 + 有操作可解、无操作不可解校验 +
+ * 三变体 + 3 命连送 + 上局残影 + 音乐循环 + HUD/结算
+ * ============================================================ */
+'use strict';
+
+const DAILY_TYPES = ['star', 'planet', 'blackhole', 'repulsor'];
+const DAILY_BODY = {
+  star: { mass: 3000, r: 48 }, planet: { mass: 900, r: 24 },
+  blackhole: { mass: 1200, r: 22 }, repulsor: { mass: 900, r: 28 },
+};
+
+function genDailyField(seed) {
+  const rng = mulberry32(seed);
+  const level = {
+    id: 'daily', name: '每日护送', par: 99, chapter: 0,
+    start: { x: 100, y: 450 },
+    target: { x: 1200 + Math.floor(rng() * 280), y: 150 + Math.floor(rng() * 600), r: 26 },
+    bodies: [],
+    hint: '',
+    launch: { speed: 260 + Math.floor(rng() * 40), angleDeg: -15 + Math.floor(rng() * 30) },
+    parTime: 99,
+  };
+  for (let i = 0; i < 3; i++) {
+    const type = DAILY_TYPES[Math.floor(rng() * 4)];
+    const b = DAILY_BODY[type];
+    level.bodies.push({
+      x: 500 + Math.floor(rng() * 600), y: 150 + Math.floor(rng() * 600),
+      mass: b.mass, r: b.r, type, hue: type === 'star' ? 35 : type === 'repulsor' ? 330 : type === 'blackhole' ? 350 : 205,
+      movement: null,
+    });
+  }
+  return level;
+}
+
+/* Build with a real, reproducible steering witness; reject unattended delivery.
+ * A stationary cursor is enough to demonstrate feasibility, without an online solver.
+ * All terrain is retained. Target is selected on that controlled flight only when
+ * it stays clear of the entire unattended flight and of every terrain body.
+ */
+function dailyFlight(level, cursor) {
+  const W = makeWorld(level, { noIgnite: true });
+  const pts = [];
+  for (let i = 0; i < 2500; i++) {
+    advance(W, { tx: cursor.x, ty: cursor.y, hold: false, skip: false });
+    if (W.ship) pts.push({ x: W.ship.x, y: W.ship.y });
+    if (W.phase === 'lost' || W.phase === 'done') break;
+  }
+  return { points: pts, win: W.phase === 'done', t: W.t };
+}
+function dailyValidate(level) {
+  const idle = dailyFlight(level, parkOf(level));
+  const controlled = level.witness ? dailyFlight(level, level.witness) : { win: false };
+  return { pass: !idle.win && controlled.win, unattended: idle.win, controlled: controlled.win };
+}
+function buildDailyLevel(seed) {
+  for (let attempt = 0; attempt < 64; attempt++) {
+    const lv = genDailyField((seed + attempt * 7919) >>> 0);
+    lv.target = { x: 10000, y: 10000, r: 26 };
+    const idle = dailyFlight(lv, parkOf(lv)).points;
+    const cursors = [{x:650,y:200},{x:650,y:700},{x:1000,y:250},{x:1000,y:650},{x:1300,y:450}];
+    for (const cursor of cursors) {
+      const points = dailyFlight(lv, cursor).points;
+      for (let i = points.length - 1; i >= 0; i -= 12) {
+        const p = points[i];
+        if (p.x < 1050 || p.x > 1480 || p.y < 100 || p.y > 800) continue;
+        if (lv.bodies.some(b => Math.hypot(b.x-p.x,b.y-p.y) < b.r + 90)) continue;
+        if (idle.some(q => Math.hypot(q.x-p.x,q.y-p.y) < 65)) continue;
+        lv.target = { x: p.x, y: p.y, r: 26 };
+        lv.witness = cursor;
+        lv.hint = '移动黑洞，改变航向，把飞船牵入虫洞';
+        if (dailyValidate(lv).pass) return lv;
+        lv.target = { x: 10000, y: 10000, r: 26 };
+      }
+    }
+  }
+  // Fail explicitly rather than publishing an unverified or empty field.
+  throw new Error('未找到经过验证的每日星域');
+}
+
+const DAILY_VARIANTS = ['标准日', '禁点火日', '限燃料日'];
+
+function startDaily() {
+  const seed = Math.floor(Date.now() / 86400000);
+  const variant = seed % 3;
+  let level;
+  try { level = buildDailyLevel(seed); }
+  catch (error) { console.error(error); toast('星域生成失败，请重试'); return; }
+  GAME.mode = 'daily';
+  GAME.daily = {
+    seed, variant, variantName: DAILY_VARIANTS[variant],
+    level,
+    lives: 3, ships: 0, combo: 0, comboPeak: 0, score: 0,
+    nextMilestone: 1000,
+    respawnT: 0,
+    trails: [], curTrail: [],
+    zeroAll: true,
+  };
+  GAME.W = makeWorld(level, {
+    fuelMax: variant === 2 ? 0.8 : CFG.FUEL_MAX,
+    noIgnite: variant === 1,
+  });
+  bakeLevelSprites(level);
+  resetLevelVisualState(level);
+  GAME.resultData = null;
+  GAME.dailyGhost = (SAVE.daily.lastTrail || []);
+  GAME.attemptSession = 0;
+  UI.state = 'playing';
+  musicStart();
+  if (!AUDIO._brown) { AUDIO._brown = true; startBrownPad(); }
+  fxText(800, 200, '每日护送 #' + seed + ' · ' + DAILY_VARIANTS[variant], PAL.amberHi, { big: true, life: 2 });
+}
+
+function dailyNextShip() {
+  const d = GAME.daily;
+  if (!d) return;
+  if (d.lives <= 0) { dailyFinish(); return; }
+  d.respawnT = 0;
+  GAME.resultData = null;
+  GAME.W = makeWorld(d.level, {
+    fuelMax: d.variant === 2 ? 0.8 : CFG.FUEL_MAX,
+    noIgnite: d.variant === 1,
+  });
+  GAME.trail = []; GAME.strokePath = [];
+  clearGameInput();
+  const park = parkOf(d.level);
+  GAME.input.x = park.x; GAME.input.y = park.y;
+  GAME.captureAnim = null;
+}
+
+/* 统一离场口：停音乐 + 清会话（选关/返回/收工共用） */
+function leaveDaily() {
+  if (GAME.mode !== 'daily') return;
+  musicStop();
+  GAME.daily = null;
+  GAME.dailyGhost = null;
+  GAME.mode = 'campaign';
+}
+
+function dailyOnDeliver() {
+  const d = GAME.daily;
+  d.ships++;
+  d.combo++;
+  d.comboPeak = Math.max(d.comboPeak, 1 + Math.min(d.combo, 20) * 0.1);
+  const mult = 1 + Math.min(d.combo, 20) * 0.1;
+  const gr = computeGrazePts(GAME.W).total;
+  const zeroStroke = !GAME.W.strokeIgnite;
+  if (!zeroStroke) d.zeroAll = false;
+  let gain = Math.round(1000 * mult) + gr;
+  if (d.variant === 1 && zeroStroke) gain += 200;
+  d.score += gain;
+  // 记录航迹（≤32 点 @250ms）
+  if (d.curTrail.length) d.trails.push(d.curTrail.slice(0, 32));
+  d.curTrail = [];
+  if (d.trails.length > 10) d.trails.shift();
+  fxText(GAME.W.target.x, GAME.W.target.y - 40, '+' + gain + (d.combo > 1 ? '  ×' + mult.toFixed(1) : ''), PAL.ok, { big: true });
+  // 补发计时挂主循环（暂停即停，无真实时间漏发）
+  d.respawnT = 0.7;
+  // 里程碑分档
+  if (d.score >= d.nextMilestone) {
+    SFX.milestone();
+    d.nextMilestone = (Math.floor(d.score / 1000) + 1) * 1000;
+  }
+  // 连送里程碑（按连送数 combo，坠毁归零后重新计）
+  if ([5, 10, 15, 20].indexOf(d.combo) >= 0) {
+    fxText(800, 260, '连送 ×' + d.combo, PAL.gold, { big: true, life: 1.4 });
+    SFX.comboUp(d.combo);
+  }
+}
+
+function dailyFinish() {
+  const d = GAME.daily;
+  if (!d) return;
+  musicStop();
+  const sameDay = SAVE.daily.date === d.seed;
+  SAVE.daily.date = d.seed;
+  if (!sameDay) SAVE.daily.bestShips = 0;
+  SAVE.daily.bestShips = Math.max(SAVE.daily.bestShips, d.ships);
+  SAVE.daily.lastShips = d.ships;
+  // 残影存对象（与渲染端读法同构）
+  SAVE.daily.lastTrail = d.trails.map(tr => tr.map(p => ({ x: Math.round(p.x), y: Math.round(p.y) })));
+  saveSoon();
+  GAME.dailyResult = {
+    daily: true, seed: d.seed, ships: d.ships, score: d.score,
+    variantName: d.variant === 1 && d.zeroAll ? d.variantName + ' · 零点火上局' : d.variantName,
+    comboPeak: d.comboPeak, lives: d.lives,
+  };
+  GAME.daily = null;
+  clearGameInput();
+  UI.state = 'result';
+  UI.resultAnim = 0;
+  SFX.levelClear();
+}
+
+/* 航迹采样（250ms）由主循环调用 */
+function dailySampleTrail() {
+  const d = GAME.daily;
+  if (!d || !GAME.W || !GAME.W.ship) return;
+  const now = GAME.W.t;
+  const last = d.curTrail.length ? d.curTrail[d.curTrail.length - 1] : null;
+  if (!last || now - last.t >= 0.25) {
+    d.curTrail.push({ x: GAME.W.ship.x, y: GAME.W.ship.y, t: now });
+    if (d.curTrail.length > 32) d.curTrail.shift();
+  }
+}
+
+/* ---------- 护送 HUD（§2.9） ---------- */
+function drawDailyHUD(g, pad, fs) {
+  const d = GAME.daily;
+  if (!d) return;
+  // 左上命数
+  g.textAlign = 'left';
+  g.font = '600 ' + fs + 'px "Segoe UI",sans-serif';
+  let lives = '[';
+  for (let i = 0; i < 3; i++) lives += i < d.lives ? '●' : '·';
+  lives += ']';
+  g.fillStyle = d.lives > 1 ? PAL.text : PAL.danger;
+  g.fillText('命 ' + lives, pad, pad + fs);
+  // 顶中分数 + 连送条
+  g.textAlign = 'center';
+  g.fillStyle = PAL.text;
+  g.font = '700 ' + fs * 1.25 + 'px "Segoe UI",sans-serif';
+  g.fillText(String(d.score), V.w / 2, pad + fs * 1.3);
+  if (d.combo > 0) {
+    const comboCol = d.combo >= 15 ? '#ff6b6b' : d.combo >= 10 ? '#ff9f43' : d.combo >= 5 ? PAL.gold : '#48bb78';
+    g.fillStyle = comboCol;
+    g.font = '600 ' + fs * 0.85 + 'px "Segoe UI","Microsoft YaHei",sans-serif';
+    g.fillText('连送 ×' + d.combo + ' · ×' + (1 + Math.min(d.combo, 20) * 0.1).toFixed(1), V.w / 2, pad + fs * 2.5);
+  }
+  // 里程碑缺口
+  g.fillStyle = PAL.textFaint;
+  g.font = '400 ' + fs * 0.72 + 'px "Segoe UI","Microsoft YaHei",sans-serif';
+  g.fillText('下一 1000 分档还差 ' + Math.max(0, d.nextMilestone - d.score), V.w / 2, pad + fs * 3.7);
+  // 右上 本局/上局
+  g.textAlign = 'right';
+  g.fillStyle = PAL.textDim;
+  g.font = '500 ' + fs * 0.85 + 'px "Segoe UI","Microsoft YaHei",sans-serif';
+  g.fillText('本局 ' + d.ships + ' 船 / 上局 ' + (SAVE.daily.lastShips || 0) + ' 船', V.w - pad - 44, pad + fs);
+  // 变体标记
+  if (d.variant !== 0) {
+    g.fillStyle = d.variant === 1 ? PAL.textFaint : PAL.amber;
+    g.font = '600 ' + fs * 0.8 + 'px "Segoe UI","Microsoft YaHei",sans-serif';
+    g.fillText(d.variantName, V.w - pad - 44, pad + fs * 2.2);
+  }
+}
+
+function drawDailyResult(g, rd, x0, y0, cw, t) {
+  const cx = V.w / 2;
+  g.textAlign = 'center';
+  g.font = '700 52px "Segoe UI",sans-serif';
+  g.fillStyle = PAL.text;
+  g.fillText(String(rd.ships) + ' 船', cx, y0 + 120);
+  g.font = '600 22px "Segoe UI","Microsoft YaHei",sans-serif';
+  g.fillStyle = PAL.ice;
+  g.fillText('得分 ' + rd.score + ' · 峰值倍率 ×' + rd.comboPeak.toFixed(1), cx, y0 + 165);
+  g.font = '500 16px "Segoe UI","Microsoft YaHei",sans-serif';
+  g.fillStyle = PAL.textDim;
+  g.fillText('💀 剩余 ' + rd.lives + ' 命 · ' + rd.variantName, cx, y0 + 200);
+  g.fillStyle = PAL.textFaint;
+  g.font = '400 14px "Segoe UI","Microsoft YaHei",sans-serif';
+  g.fillText('历史最佳 ' + SAVE.daily.bestShips + ' 船 · 明天有新的星域', cx, y0 + 230);
+  // 复制战绩
+  button(g, cx - 190, y0 + 280, 180, 42, '复制战绩卡', () => {
+    const txt = '牵星护送 #' + rd.seed + ' · ' + rd.ships + ' 船 💀' + rd.lives + ' · ×' + rd.comboPeak.toFixed(1) + ' · ' + rd.variantName;
+    if (navigator.clipboard) navigator.clipboard.writeText(txt).then(() => toast('战绩卡已复制'));
+  }, { fs: 14 });
+  button(g, cx + 10, y0 + 280, 180, 42, '再来一局', () => { transitionTo(() => startDaily()); }, { primary: true });
+  button(g, cx - 190, y0 + 330, 380, 34, '返 回', () => { UI.state = 'title'; }, { fs: 13 });
+}
+
+
+/* ============================================================
+ * 牵星 QIANXING · 10_main.js
+ * 主循环：固定步 accumulator（DT=1/120）× 慢动作/hit-stop、渲染、启动
+ * ============================================================ */
+'use strict';
+
+(function boot() {
+  const canvas = document.getElementById('cv');
+  V.canvas = canvas;
+  V.ctx = canvas.getContext('2d', { alpha: false });
+  loadSave();
+  try { AUDIO.muted = localStorage.getItem('qianxing.muted') === '1'; } catch (e) { void e; }
+  fitCanvas();
+  window.addEventListener('resize', fitCanvas);
+  bakeAll(20261024);
+  setupInput(canvas);
+  // 标题叠加在 c1-l1 实时场景上（§6.1；isBg=true 不消耗教学标记）
+  loadLevel('c1-l1', true);
+  UI.state = 'title';
+
+  // 调试接口
+  window.__qx = { GAME, CFG, UI, FX, SAVE, LEVEL_INDEX, dailyValidate, buildDailyLevel };
+
+  let last = performance.now();
+  let acc = 0;
+  const MAX_DT = 0.1;
+  function loop(now) {
+    requestAnimationFrame(loop);
+    let dtRaw = (now - last) / 1000;
+    last = now;
+    if (dtRaw > MAX_DT) dtRaw = MAX_DT;
+    if (dtRaw <= 0) dtRaw = 1 / 120;
+
+    const W = GAME.W;
+    const stepping = W && (UI.state === 'playing' || UI.state === 'title' || UI.state === 'result');
+    const ts = stepping ? fxTimeScale() : 0;
+    audioSlowmoLP(ts < 1);
+
+    if (stepping && W) {
+      // 慢动作改 ft×timeScale，不改 DT（§3.1）
+      acc += dtRaw * ts;
+      let steps = 0;
+      while (acc >= CFG.DT && steps < 12) {
+        if (GAME.mode === 'daily' && GAME.daily && GAME.daily.lives <= 0) { acc = 0; break; }
+        const inp = UI.state === 'playing' ? {
+          tx: GAME.input.x, ty: GAME.input.y,
+          hold: GAME.input.hold && W.bh.wake,
+          skip: GAME.input.skip && W.phase === 'lost',
+        } : { tx: parkOf(W.level).x, ty: parkOf(W.level).y, hold: false, skip: false };
+        advance(W, inp);
+        acc -= CFG.DT;
+        steps++;
+        if (W.phase === 'done') break;
+      }
+      if (UI.state === 'playing') {
+        gameFrame(dtRaw);
+        if (GAME.mode === 'daily') dailySampleTrail();
+      } else {
+        // 标题/结算：吸掉事件不演出
+        W.events.length = 0;
+      }
+    }
+    fxUpdate(dtRaw);
+    renderFrame(dtRaw);
+  }
+  requestAnimationFrame(loop);
+})();
+
+</script>
+</body>
+</html>
