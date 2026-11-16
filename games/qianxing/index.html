@@ -1855,13 +1855,18 @@ FX.drawFlashes = function (g) {
 
 const AUDIO = {
   ctx: null, master: null, sfxBus: null, ambBus: null, slowLP: null,
-  muted: false, oscCount: 0,
+  muted: true, oscCount: 0,
   noiseBuf: null, brownBuf: null,
   igniteGain: null, dangerGain: null,
   ambStarted: false, musicTimer: null, musicStep: 0, musicNext: 0,
   lastPlay: {},
 };
 
+// First visit stays silent; only an explicit saved opt-in enables sound.
+function loadAudioPreference() {
+  AUDIO.muted = true;
+  try { AUDIO.muted = localStorage.getItem('qianxing.muted') !== '0'; } catch (_) { /* Storage unavailable: remain silent. */ }
+}
 function audioInit() {
   if (AUDIO.ctx) return;
   const AC = window.AudioContext || window.webkitAudioContext;
@@ -2921,9 +2926,11 @@ function drawTitle(g) {
   // 标题叠加在实时场景上（§6.1）
   g.fillStyle = 'rgba(4,6,13,0.55)';
   g.fillRect(0, 0, V.w, V.h);
-  const cx = V.w / 2;
+  const compact = V.h < 560 && V.w > V.h;
+  const cx = compact ? V.w * 0.28 : V.w / 2;
+  const buttonsX = compact ? V.w * 0.73 : cx;
   g.textAlign = 'center';
-  const titleY = V.h * 0.3 + Math.sin(V.t * 1.2) * 4;
+  const titleY = V.h * (compact ? 0.39 : 0.3) + Math.sin(V.t * 1.2) * 4;
   g.font = '700 ' + clamp(V.h * 0.11, 56, 96) + 'px "Segoe UI","Microsoft YaHei",sans-serif';
   g.fillStyle = PAL.amberHi;
   g.shadowColor = PAL.amber; g.shadowBlur = 24;
@@ -2937,19 +2944,19 @@ function drawTitle(g) {
   g.fillText('你不发射飞船——你就是引力', cx, titleY + 76);
   const bw = Math.min(260, V.w * 0.4), bh = 46;
   const hasSave = SAVE.unlocked > 1;
-  let y = V.h * 0.56;
-  button(g, cx - bw / 2, y, bw, bh, hasSave ? '启程 · 继续' : '启程', () => {
+  let y = compact ? (V.h - 166) / 2 : V.h * 0.56;
+  button(g, buttonsX - bw / 2, y, bw, bh, hasSave ? '启程 · 继续' : '启程', () => {
     transitionTo(() => { startCampaign(continueLevelId()); });
   }, { primary: true, big: true, fs: 19 });
   y += bh + 14;
-  button(g, cx - bw / 2, y, bw, bh, '选 关', () => { UI.state = 'select'; });
+  button(g, buttonsX - bw / 2, y, bw, bh, '选 关', () => { UI.state = 'select'; });
   y += bh + 14;
-  button(g, cx - bw / 2, y, bw, bh, '每日护送', () => {
+  button(g, buttonsX - bw / 2, y, bw, bh, '每日护送', () => {
     transitionTo(() => startDaily());
   }, { fs: 15 });
   g.font = '400 13px "Segoe UI","Microsoft YaHei",sans-serif';
   g.fillStyle = PAL.textFaint;
-  g.fillText('移动光标牵引 · 按住点火 · R 弃船 · Esc 暂停', cx, V.h - 40);
+  g.fillText(usesTouchControls() ? '拖动黑洞牵引 · 另一只手按住点火' : '移动光标牵引 · 按住点火 · R 弃船 · Esc 暂停', V.w / 2, V.h - 20);
   const clears = LEVEL_ORDER.every(id => SAVE.best[id]);
   if (clears) {
     g.fillStyle = PAL.gold;
@@ -2968,12 +2975,18 @@ function drawSelect(g) {
   g.fillText('星 图', cx, 52);
   const gridW = Math.min(V.w * 0.92, 900);
   const cell = gridW / 6;
-  const rows = 5;
-  const topY = 90;
-  const rowH = Math.min((V.h - topY - 90) / rows, 92);
+  const compact = V.h < 600;
+  const topY = compact ? 132 : 90;
+  const rowH = compact ? 100 : Math.min((V.h - topY - 90) / 5, 92);
+  const selected = UI.selectChapter || Math.ceil(clamp(SAVE.unlocked, 1, 30) / 6);
+  if (compact) for (let ch = 1; ch <= 5; ch++) {
+    const w = gridW / 5;
+    button(g, cx-gridW/2+(ch-1)*w, 68, w-6, 44, '第' + ch + '章', () => { UI.selectChapter = ch; }, { primary: ch === selected, fs: 14 });
+  }
   for (let ch = 1; ch <= 5; ch++) {
+    if (compact && ch !== selected) continue;
     const meta = CHAPTERS_META[ch - 1];
-    const y = topY + (ch - 1) * rowH;
+    const y = topY + (compact ? 0 : ch - 1) * rowH;
     g.textAlign = 'left';
     g.font = '600 15px "Segoe UI","Microsoft YaHei",sans-serif';
     g.fillStyle = PAL.textDim;
@@ -2989,7 +3002,7 @@ function drawSelect(g) {
       const unlocked = idx < SAVE.unlocked;
       const bx = cx - gridW / 2 + i * cell + cell / 2;
       const by = y + 52;
-      const r = Math.min(cell, rowH - 40) * 0.5 * 0.72;
+      const r = Math.max(18, Math.min(cell - 10, rowH - 40) * 0.5 * 0.72);
       // 连线
       if (i < 5) {
         g.strokeStyle = best ? rgba(PAL.ok, 0.3) : 'rgba(87,97,127,0.3)';
@@ -3025,7 +3038,7 @@ function drawSelect(g) {
           g.fillText(best.rating, bx, by - r - 8);
         }
         UI.buttons.push({
-          x: bx - r - 4, y: by - r - 4, w: r * 2 + 8, h: r * 2 + 8,
+          x: bx - Math.max(22,r+4), y: by - Math.max(22,r+4), w: Math.max(44,r*2+8), h: Math.max(44,r*2+8),
           cb: () => { transitionTo(() => startCampaign(id)); },
         });
         if (hov) {
@@ -3048,42 +3061,44 @@ function drawPaused(g) {
   g.fillStyle = 'rgba(4,6,13,0.66)';
   g.fillRect(0, 0, V.w, V.h);
   const cx = V.w / 2;
+  const short = V.h < 500 && V.w > V.h;
+  const mainX = short ? V.w * .28 : cx;
   g.textAlign = 'center';
   g.font = '700 34px "Segoe UI","Microsoft YaHei",sans-serif';
   g.fillStyle = PAL.text;
-  g.fillText('暂 停', cx, V.h * (V.h < 500 ? 0.12 : 0.3));
-  const bw = 220, bh = 44;
-  let y = V.h * (V.h < 500 ? 0.20 : 0.38);
-  button(g, cx - bw / 2, y, bw, bh, '继 续', () => { UI.state = 'playing'; }, { primary: true });
-  y += bh + 12;
-  button(g, cx - bw / 2, y, bw, bh, GAME.mode === 'daily' ? '结算收工' : '重玩本关', () => {
+  g.fillText('暂 停', cx, short ? 40 : V.h * .3);
+  const bw = Math.min(220, V.w*.42 + (short ? 0 : 100)), bh = 44;
+  let y = short ? 66 : V.h * .38;
+  button(g, mainX - bw / 2, y, bw, bh, '继 续', () => { UI.state = 'playing'; }, { primary: true });
+  y += bh + (short ? 10 : 12);
+  button(g, mainX - bw / 2, y, bw, bh, GAME.mode === 'daily' ? '结算收工' : '重玩本关', () => {
     if (GAME.mode === 'daily') { transitionTo(() => dailyFinish()); }
     else transitionTo(() => startCampaign(GAME.W.id));
   });
-  y += bh + 12;
-  button(g, cx - bw / 2, y, bw, bh, '选 关', () => {
+  y += bh + (short ? 10 : 12);
+  button(g, mainX - bw / 2, y, bw, bh, '选 关', () => {
     if (GAME.mode === 'daily') leaveDaily();
     flushSave();
     UI.state = 'select';
   });
-  y += bh + 12;
-  button(g, cx - bw / 2, y, bw, bh, AUDIO.muted ? '声音：关' : '声音：开', () => { audioSetMuted(!AUDIO.muted); });
+  y += bh + (short ? 10 : 12);
+  button(g, mainX - bw / 2, y, bw, bh, AUDIO.muted ? '声音：关' : '声音：开', () => { audioSetMuted(!AUDIO.muted); });
   // 快捷设置
-  const sw = 104, sy = y + bh + 16;
+  const sw = short ? Math.min(200,V.w*.36) : 104, sy = y + bh + 16;
   const narrow = V.w < 480;
-  const sx = i => narrow ? cx - sw - 6 + (i % 2) * (sw + 12) : cx - sw * 2 - 12 + i * (sw + 8);
-  const syAt = i => sy + (narrow ? Math.floor(i / 2) * 44 : 0);
-  button(g, sx(0), syAt(0), sw, 34, SETTINGS.colorblind ? '色盲模式 开' : '色盲模式 关', () => {
+  const sx = i => short ? V.w*.72-sw/2 : narrow ? cx - sw - 6 + (i % 2) * (sw + 12) : cx - sw * 2 - 12 + i * (sw + 8);
+  const syAt = i => short ? 66+i*54 : sy + (narrow ? Math.floor(i / 2) * 54 : 0);
+  button(g, sx(0), syAt(0), sw, 44, SETTINGS.colorblind ? '色盲模式 开' : '色盲模式 关', () => {
     SETTINGS.colorblind = !SETTINGS.colorblind; saveSoon();
     bakeAll(20261024); if (GAME.W) bakeLevelSprites(GAME.W.level);
   }, { fs: 13 });
-  button(g, sx(1), syAt(1), sw, 34, SETTINGS.shakeScale > 0 ? '震动 开' : '震动 关', () => {
+  button(g, sx(1), syAt(1), sw, 44, SETTINGS.shakeScale > 0 ? '震动 开' : '震动 关', () => {
     SETTINGS.shakeScale = SETTINGS.shakeScale > 0 ? 0 : 1; saveSoon();
   }, { fs: 13 });
-  button(g, sx(2), syAt(2), sw, 34, SETTINGS.control === 'absolute' ? '操控：悬浮' : '操控：拖拽', () => {
+  button(g, sx(2), syAt(2), sw, 44, SETTINGS.control === 'absolute' ? '操控：悬浮' : '操控：拖拽', () => {
     SETTINGS.control = SETTINGS.control === 'absolute' ? 'relative' : 'absolute'; saveSoon();
   }, { fs: 13 });
-  button(g, sx(3), syAt(3), sw, 34, SETTINGS.music ? '音乐 开' : '音乐 关', () => {
+  button(g, sx(3), syAt(3), sw, 44, SETTINGS.music ? '音乐 开' : '音乐 关', () => {
     SETTINGS.music = !SETTINGS.music; saveSoon();
   }, { fs: 13 });
 }
@@ -3091,6 +3106,7 @@ function drawPaused(g) {
 function drawResult(g) {
   const rd = GAME.resultData || GAME.dailyResult;
   if (!rd) { UI.state = 'title'; return; }
+  if (V.h < 600 && V.w > V.h) { drawCompactResult(g, rd); return; }
   UI.resultAnim += 1 / 60;
   const t = UI.resultAnim;
   g.fillStyle = 'rgba(4,6,13,0.72)';
@@ -3108,7 +3124,7 @@ function drawResult(g) {
   // 标题
   g.font = '600 20px "Segoe UI","Microsoft YaHei",sans-serif';
   g.fillStyle = PAL.text;
-  g.fillText(daily ? '每日护送 #' + rd.seed + (rd.variantName ? ' · ' + rd.variantName : '') : rd.id + '「' + rd.name + '」', cx, y0 + 40);
+  g.fillText(daily ? '每日护送 #' + rd.seed + (rd.variantName ? ' · ' + rd.variantName : '') : rd.id + '「' + rd.name + '」', cx, y0 + 40, cw - 24);
   if (daily) {
     drawDailyResult(g, rd, x0, y0, cw, t);
     return;
@@ -3181,24 +3197,59 @@ function drawResult(g) {
     if (!gapTxt && rating === 'B') gapTxt = '距 A 还差 ' + (1400 - rd.parts.total) + ' 分';
     if (gapTxt) g.fillText(gapTxt, cx, ly + 6);
   }
-  // 星座卡 + 按钮
-  const miniY = Math.min(ly + 24, y0 + chh - 150);
-  button(g, cx - 190, miniY, 180, 38, '保存星座卡 PNG', () => saveConstellationPNG(), { fs: 14 });
-  button(g, cx + 10, miniY, 180, 38, '复制战绩卡', () => {
-    const txt = '牵星 ' + rd.id + '「' + rd.name + '」 ' + rating + ' 杆' + rd.strokes + '/' + rd.par +
-      (rd.parts.graze ? ' 掠过+' + rd.parts.graze : '') + ' 用时' + rd.time.toFixed(1) + 's/' + rd.parTime + 's 尝试' + (SAVE.best[rd.id] ? SAVE.best[rd.id].attempts : rd.strokes);
-    if (navigator.clipboard) navigator.clipboard.writeText(txt).then(() => toast('战绩卡已复制'), () => toast('复制失败'));
-  }, { fs: 14 });
-  const by2 = miniY + 48;
-  const last = rd.id === 'c5-l6';
-  button(g, cx - 190, by2, 180, 42, last ? '完成全图 ★' : '下一关 →', () => {
-    if (last) { UI.allClear = true; UI.state = 'select'; return; }
-    const idx = LEVEL_ORDER.indexOf(rd.id);
-    const next = LEVEL_ORDER[Math.min(idx + 1, 29)];
-    transitionTo(() => startCampaign(next));
-  }, { primary: true });
-  button(g, cx + 10, by2, 180, 42, '重 试', () => { transitionTo(() => startCampaign(rd.id)); });
-  button(g, cx - 190, by2 + 50, 380, 34, '选 关', () => { UI.state = 'select'; }, { fs: 13 });
+  // Shared actions, sized to the actual panel width on narrow phones.
+  const miniY = Math.min(ly + 24, y0 + chh - 162);
+  const width = Math.min(380, cw - 24), half = (width - 12) / 2;
+  const actions = resultActions(rd);
+  button(g, cx-width/2, miniY, half, 44, actions[3].label, actions[3].run, {fs:13});
+  button(g, cx+6, miniY, half, 44, actions[4].label, actions[4].run, {fs:13});
+  button(g, cx-width/2, miniY+54, half, 44, actions[0].label, actions[0].run, {primary:true});
+  button(g, cx+6, miniY+54, half, 44, actions[1].label, actions[1].run);
+  button(g, cx-width/2, miniY+108, width, 44, actions[2].label, actions[2].run, {fs:13});
+
+}
+
+// One source of truth for portrait/landscape result actions.
+function copyBattleCard(rd) {
+  const txt = rd.daily
+    ? '牵星护送 #' + rd.seed + ' · ' + rd.ships + ' 船 · 得分 ' + rd.score + ' · ' + rd.variantName
+    : '牵星 ' + rd.id + '「' + rd.name + '」 ' + rd.parts.rating + ' 杆' + rd.strokes + '/' + rd.par + ' · 得分 ' + rd.parts.total + ' · ' + rd.time.toFixed(1) + 's';
+  if (navigator.clipboard) navigator.clipboard.writeText(txt).then(() => toast('战绩卡已复制'), () => toast('复制失败'));
+  else toast('当前浏览器不支持复制');
+}
+function continueResult(rd) {
+  if (rd.id === 'c5-l6') { UI.allClear = true; UI.state = 'select'; return; }
+  transitionTo(() => startCampaign(LEVEL_ORDER[Math.min(LEVEL_ORDER.indexOf(rd.id) + 1, 29)]));
+}
+function resultActions(rd) {
+  if (rd.daily) return [
+    {label:'再来一局', run:()=>transitionTo(startDaily)},
+    {label:'返回首页', run:()=>{ UI.state='title'; }},
+    {label:'复制战绩卡', run:()=>copyBattleCard(rd)},
+  ];
+  return [
+    {label:rd.id === 'c5-l6' ? '完成全图 ★' : '下一关 →', run:()=>continueResult(rd)},
+    {label:'重试', run:()=>transitionTo(()=>startCampaign(rd.id))},
+    {label:'选关', run:()=>{UI.state='select';}},
+    {label:'保存星座卡 PNG', run:saveConstellationPNG},
+    {label:'复制战绩卡', run:()=>copyBattleCard(rd)},
+  ];
+}
+function drawCompactResult(g, rd) {
+  g.fillStyle='rgba(4,6,13,0.94)'; g.fillRect(0,0,V.w,V.h);
+  const left=V.w*.29, right=V.w*.61, width=Math.min(250,V.w*.34);
+  g.textAlign='center'; g.fillStyle=PAL.text;
+  g.font='600 19px "Segoe UI","Microsoft YaHei",sans-serif';
+  g.fillText(rd.daily ? '每日护送 #' + rd.seed : rd.id + ' · ' + rd.name, left, 54, V.w*.5);
+  g.font='700 42px "Segoe UI",sans-serif'; g.fillStyle=PAL.amberHi;
+  g.fillText(rd.daily ? rd.ships+' 船' : rd.parts.rating+' · '+rd.parts.total, left, 112);
+  const lines = rd.daily
+    ? ['得分 '+rd.score, '峰值倍率 ×'+rd.comboPeak.toFixed(1), rd.variantName, '历史最佳 '+SAVE.daily.bestShips+' 船']
+    : ['第 '+rd.strokes+' 杆 / par '+rd.par, '用时 '+rd.time.toFixed(1)+'s / '+rd.parTime+'s', '掠过 +'+rd.parts.graze+' · 省杆 +'+rd.parts.save, '零点火 +'+rd.parts.zero+' · 时限 +'+rd.parts.time];
+  g.font='500 15px "Segoe UI","Microsoft YaHei",sans-serif'; g.fillStyle=PAL.textDim;
+  lines.forEach((line,i)=>g.fillText(line,left,156+i*29,V.w*.5));
+  const actions=resultActions(rd), top=Math.max(56,(V.h-actions.length*48)/2);
+  actions.forEach((action,i)=>button(g,right,top+i*48,width,44,action.label,action.run,{primary:i===0,fs:14}));
 }
 
 /* ---------- 静音按钮（§8.6） ---------- */
@@ -3271,20 +3322,30 @@ function startCampaign(id) {
 }
 
 /* Pointer ownership: steering and ignition can be held by separate fingers. */
-const POINTERS = { steer: null, fire: null, last: null, touch: false };
+const POINTERS = { steer: null, fire: null, last: null, offset: null, touch: false };
+function usesTouchControls() { return POINTERS.touch || navigator.maxTouchPoints > 0; }
 function clearGameInput() {
-  POINTERS.steer = POINTERS.fire = POINTERS.last = null;
+  POINTERS.steer = POINTERS.fire = POINTERS.last = POINTERS.offset = null;
   GAME.input.hold = false; GAME.input.skip = false;
 }
 function fireRect() { return { x: V.w - 120, y: V.h - 76, w: 104, h: 56 }; }
 function drawTouchControls(g) {
-  if (UI.state !== 'playing' || !(POINTERS.touch || navigator.maxTouchPoints > 0)) return;
+  if (UI.state !== 'playing' || !usesTouchControls()) return;
   const r = fireRect();
   button(g, r.x, r.y, r.w, r.h, GAME.W && GAME.W.noIgniteMode ? '禁点火日' : GAME.input.hold ? '点火中' : '按住点火', () => {}, { primary: true, fs: 16 });
   button(g, 16, V.h - 64, 76, 44, '暂停', enterPaused, { fs: 15 });
 }
 function setupInput(canvas) {
-  const toWorld = e => screenToWorld(e.clientX, e.clientY - (e.pointerType === 'touch' ? 70 : 0));
+  const toWorld = e => {
+    const off = e.pointerType === 'touch' ? POINTERS.offset : null;
+    const w = screenToWorld(e.clientX + (off ? off.x : 0), e.clientY + (off ? off.y : 0));
+    return { x: clamp(w.x, -80, 1680), y: clamp(w.y, -80, 980) };
+  };
+  const capture = e => { try { canvas.setPointerCapture(e.pointerId); } catch (_) { /* Older browsers retain window listeners. */ } };
+  const fireInside = (e, margin = 0) => {
+    const r = fireRect();
+    return e.clientX >= r.x-margin && e.clientX <= r.x+r.w+margin && e.clientY >= r.y-margin && e.clientY <= r.y+r.h+margin;
+  };
   const move = e => {
     if (SETTINGS.control === 'relative') {
       if (POINTERS.last) {
@@ -3300,6 +3361,7 @@ function setupInput(canvas) {
   window.addEventListener('pointermove', e => {
     UI.hover = { x: e.clientX, y: e.clientY };
     if (UI.state !== 'playing' || UI.trans) return;
+    if (e.pointerType === 'touch' && e.pointerId === POINTERS.fire) { GAME.input.hold = fireInside(e, 18); return; }
     if (e.pointerId === POINTERS.steer || (e.pointerType === 'mouse' && POINTERS.steer === null && SETTINGS.control === 'absolute')) move(e);
   }, { passive: true });
   window.addEventListener('pointerdown', e => {
@@ -3309,8 +3371,8 @@ function setupInput(canvas) {
     if (e.pointerType === 'touch') POINTERS.touch = true;
     UI.hover = { x: e.clientX, y: e.clientY };
     const r = fireRect();
-    if (UI.state === 'playing' && e.pointerType === 'touch' && e.clientX >= r.x && e.clientX <= r.x+r.w && e.clientY >= r.y && e.clientY <= r.y+r.h) {
-      if (!(GAME.W && GAME.W.noIgniteMode) && POINTERS.fire === null) { POINTERS.fire = e.pointerId; GAME.input.hold = true; }
+    if (UI.state === 'playing' && e.pointerType === 'touch' && fireInside(e)) {
+      if (!(GAME.W && GAME.W.noIgniteMode) && POINTERS.fire === null) { POINTERS.fire = e.pointerId; GAME.input.hold = true; capture(e); }
       return;
     }
     for (const b of UI.buttons) {
@@ -3321,17 +3383,24 @@ function setupInput(canvas) {
     }
     if (UI.state !== 'playing' || POINTERS.steer !== null) return;
     POINTERS.steer = e.pointerId;
+    capture(e);
+    // Grabbing the visible black hole keeps the contact offset: no 70px snap.
+    const bh = GAME.W && GAME.W.bh;
+    const near = bh && Math.hypot(wx(bh.x)-e.clientX, wy(bh.y)-e.clientY) <= 40;
+    POINTERS.offset = e.pointerType === 'touch' ? (near ? { x: wx(bh.x)-e.clientX, y: wy(bh.y)-e.clientY } : { x: 0, y: -Math.min(24, 36*V.scale) }) : null;
     POINTERS.last = { x: e.clientX, y: e.clientY };
     move(e);
     GAME.input.skip = true;
     if (e.pointerType !== 'touch') { POINTERS.fire = e.pointerId; GAME.input.hold = true; }
   });
   const up = e => {
-    if (e.pointerId === POINTERS.steer) { POINTERS.steer = POINTERS.last = null; GAME.input.skip = false; }
+    if (e.pointerId === POINTERS.steer) { POINTERS.steer = POINTERS.last = POINTERS.offset = null; GAME.input.skip = false; }
     if (e.pointerId === POINTERS.fire) { POINTERS.fire = null; GAME.input.hold = false; }
   };
   window.addEventListener('pointerup', up);
   window.addEventListener('pointercancel', up);
+  canvas.addEventListener('lostpointercapture', up);
+  window.addEventListener('resize', clearGameInput);
   canvas.addEventListener('contextmenu', e => e.preventDefault());
 
   window.addEventListener('keydown', (e) => {
@@ -3361,9 +3430,7 @@ function setupInput(canvas) {
       if (k === ' ' || k === 'Enter') {
         const rd = GAME.resultData;
         if (rd) {
-          if (rd.id === 'c5-l6') { UI.state = 'select'; return; }
-          const idx = LEVEL_ORDER.indexOf(rd.id);
-          transitionTo(() => startCampaign(LEVEL_ORDER[Math.min(idx + 1, 29)]));
+          continueResult(rd);
         }
       }
       if (k === 'r' || k === 'R') {
@@ -3643,23 +3710,20 @@ function drawDailyResult(g, rd, x0, y0, cw, t) {
   g.textAlign = 'center';
   g.font = '700 52px "Segoe UI",sans-serif';
   g.fillStyle = PAL.text;
-  g.fillText(String(rd.ships) + ' 船', cx, y0 + 120);
+  g.fillText(String(rd.ships) + ' 船', cx, y0 + 120, cw-24);
   g.font = '600 22px "Segoe UI","Microsoft YaHei",sans-serif';
   g.fillStyle = PAL.ice;
-  g.fillText('得分 ' + rd.score + ' · 峰值倍率 ×' + rd.comboPeak.toFixed(1), cx, y0 + 165);
+  g.fillText('得分 ' + rd.score + ' · 峰值倍率 ×' + rd.comboPeak.toFixed(1), cx, y0 + 165, cw-24);
   g.font = '500 16px "Segoe UI","Microsoft YaHei",sans-serif';
   g.fillStyle = PAL.textDim;
-  g.fillText('💀 剩余 ' + rd.lives + ' 命 · ' + rd.variantName, cx, y0 + 200);
+  g.fillText('💀 剩余 ' + rd.lives + ' 命 · ' + rd.variantName, cx, y0 + 200, cw-24);
   g.fillStyle = PAL.textFaint;
   g.font = '400 14px "Segoe UI","Microsoft YaHei",sans-serif';
-  g.fillText('历史最佳 ' + SAVE.daily.bestShips + ' 船 · 明天有新的星域', cx, y0 + 230);
-  // 复制战绩
-  button(g, cx - 190, y0 + 280, 180, 42, '复制战绩卡', () => {
-    const txt = '牵星护送 #' + rd.seed + ' · ' + rd.ships + ' 船 💀' + rd.lives + ' · ×' + rd.comboPeak.toFixed(1) + ' · ' + rd.variantName;
-    if (navigator.clipboard) navigator.clipboard.writeText(txt).then(() => toast('战绩卡已复制'));
-  }, { fs: 14 });
-  button(g, cx + 10, y0 + 280, 180, 42, '再来一局', () => { transitionTo(() => startDaily()); }, { primary: true });
-  button(g, cx - 190, y0 + 330, 380, 34, '返 回', () => { UI.state = 'title'; }, { fs: 13 });
+  g.fillText('历史最佳 ' + SAVE.daily.bestShips + ' 船 · 明天有新的星域', cx, y0 + 230, cw-24);
+  const actions = resultActions(rd), width = Math.min(380, cw-24), half = (width-12)/2;
+  button(g, cx-width/2, y0+280, half, 44, actions[2].label, actions[2].run, {fs:14});
+  button(g, cx+6, y0+280, half, 44, actions[0].label, actions[0].run, {primary:true});
+  button(g, cx-width/2, y0+334, width, 44, actions[1].label, actions[1].run, {fs:14});
 }
 
 
@@ -3674,7 +3738,7 @@ function drawDailyResult(g, rd, x0, y0, cw, t) {
   V.canvas = canvas;
   V.ctx = canvas.getContext('2d', { alpha: false });
   loadSave();
-  try { AUDIO.muted = localStorage.getItem('qianxing.muted') === '1'; } catch (e) { void e; }
+  loadAudioPreference();
   fitCanvas();
   window.addEventListener('resize', fitCanvas);
   bakeAll(20261024);
