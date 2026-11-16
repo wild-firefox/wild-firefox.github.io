@@ -16,6 +16,8 @@
     <script src="/assets/js/resume.js?v=20261116" defer></script>
     <link rel="stylesheet" href="/assets/css/guangyin-promo.css?v=0359" />
     <script src="/assets/js/guangyin-promo.js?v=0359" defer></script>
+    <link rel="stylesheet" href="/assets/css/qianxing-promo.css?v=20261116a" />
+    <script src="/assets/js/qianxing-promo.js?v=20261116a" defer></script>
   </head>
   <body data-page="home">
     <a class="skip-link" href="#main" data-zh="跳至正文" data-en="Skip to content">跳至正文</a>
@@ -99,7 +101,27 @@
       </section>
       <section class="home-section" aria-labelledby="qianxing-title">
         <div class="section-heading"><span>PLAY</span><h2 id="qianxing-title" data-zh="牵星 · 你就是引力" data-en="Qianxing · You are gravity">牵星 · 你就是引力</h2></div>
-        <a href="/games/qianxing/" aria-label="开始游玩牵星"><img src="/games/qianxing/preview.png" alt="牵星游戏：移动微型黑洞，弯折飞船航线并牵入虫洞" loading="lazy" style="display:block;width:100%;height:auto;border-radius:20px"></a>
+        <div class="qx-promo" data-qx-demo>
+          <div class="qx-copy"><span class="qx-kicker">YOU ARE GRAVITY</span><h3 data-zh="不碰飞船，
+也能改变它的航线。" data-en="Move gravity.
+Change the flight path.">不碰飞船，<br>也能改变它的航线。</h3><p data-zh="拖动小黑洞，借引力绕过恒星，把飞船牵进绿色虫洞。" data-en="Drag the small black hole. Bend the flight around the star and guide the ship into the green wormhole.">拖动小黑洞，借引力绕过恒星，把飞船牵进绿色虫洞。</p><div class="qx-legend"><span><i class="qx-gold"></i><span data-zh="你控制的黑洞" data-en="Your black hole">你控制的黑洞</span></span><span><i class="qx-blue"></i><span data-zh="自动飞行的船" data-en="Auto-flying ship">自动飞行的船</span></span></div></div>
+          <div class="qx-demo">
+            <div class="qx-demo-head"><span data-zh="第二关 · 绕过烈阳" data-en="Level 2 · Around the star">第二关 · 绕过烈阳</span><button type="button" data-qx-pause aria-pressed="false">暂停演示</button></div>
+            <svg viewBox="0 0 1600 900" role="img" aria-labelledby="qx-demo-title qx-demo-desc">
+              <title id="qx-demo-title">牵星真实通关轨迹演示</title><desc id="qx-demo-desc">移动金色小黑洞，用引力让蓝色飞船绕过中央红色恒星，进入右侧绿色虫洞。虚线是无人操控时的航迹。</desc>
+              <defs><radialGradient id="qx-sun"><stop stop-color="#fff4cf"/><stop offset=".3" stop-color="#ffae73"/><stop offset="1" stop-color="#e45746" stop-opacity="0"/></radialGradient><radialGradient id="qx-exit"><stop stop-color="#baffdf" stop-opacity=".4"/><stop offset="1" stop-color="#8affc1" stop-opacity="0"/></radialGradient><filter id="qx-glow"><feGaussianBlur stdDeviation="5"/></filter></defs>
+              <g fill="#8faacc" opacity=".35"><circle cx="160" cy="150" r="2"/><circle cx="390" cy="240" r="3"/><circle cx="540" cy="100" r="2"/><circle cx="1120" cy="180" r="3"/><circle cx="1450" cy="110" r="2"/><circle cx="1200" cy="730" r="3"/><circle cx="350" cy="740" r="2"/><circle cx="700" cy="810" r="3"/><circle cx="1300" cy="300" r="2"/></g>
+              <path data-qx-miss fill="none" stroke="#a0adbc" stroke-width="3" stroke-dasharray="10 15" opacity=".3"/>
+              <g transform="translate(800 450)"><circle r="150" fill="url(#qx-sun)"/><circle r="48" fill="#ffbe85"/><circle r="64" fill="none" stroke="#e77758" stroke-width="2"/></g>
+              <g transform="translate(180 450)" stroke="#9fb6cd" fill="none"><rect x="-17" y="-30" width="20" height="60" rx="8" stroke-width="3"/><path d="M-45 -35V35" stroke-width="4"/></g>
+              <g transform="translate(1420 450)" data-qx-target><circle r="110" fill="url(#qx-exit)"/><circle r="40" fill="none" stroke="#8affc1" stroke-width="4"/><circle r="56" fill="none" stroke="#8affc1" stroke-opacity=".4" stroke-dasharray="8 12" stroke-width="2"/></g>
+              <path data-qx-trail fill="none" stroke="#8fe3ff" stroke-width="5" stroke-linecap="round"/>
+              <g data-qx-bh><circle r="52" fill="none" stroke="#ffb454" stroke-opacity=".16" stroke-width="16"/><ellipse rx="48" ry="26" transform="rotate(-28)" fill="none" stroke="#ffd69a" stroke-width="7"/><circle r="27" fill="#060b15" stroke="#ffb454" stroke-width="4"/><path d="M40 30L40 76L52 65L65 87L74 82L61 60L77 59Z" fill="white" stroke="#172130" stroke-width="3"/></g>
+              <g data-qx-ship><path d="M-35 0L-65 -10L-60 10Z" fill="#8fe3ff" opacity=".5" filter="url(#qx-glow)"/><path d="M18 0L-18 -12L-9 0L-18 12Z" fill="#d9f6ff" stroke="#8fe3ff" stroke-width="3"/></g>
+            </svg>
+            <div class="qx-demo-foot"><span data-qx-step>① 移动黑洞</span><small data-zh="真实关卡轨迹 · 静音回放" data-en="Actual level trajectory · Silent replay">真实关卡轨迹 · 静音回放</small></div>
+          </div>
+        </div>
         <p class="gy-note" data-zh="另一款自制小游戏：移动黑洞，用引力把自动飞行的飞船牵入虫洞。5 章 30 关，另有每日护送挑战；无需登录，自动保存当前浏览器的进度。电脑移动鼠标操控，手机拖动牵引，右下角独立点火；横屏体验更佳。" data-en="Another indie game: move a tiny black hole and use gravity to guide an auto-flying ship into a wormhole. 30 levels across 5 chapters, plus a daily escort challenge. No login; progress saves in this browser. Move the mouse or drag on touchscreens, with a separate ignition button. Best played in landscape.">另一款自制小游戏：移动黑洞，用引力把自动飞行的飞船牵入虫洞。5 章 30 关，另有每日护送挑战；无需登录，自动保存当前浏览器的进度。电脑移动鼠标操控，手机拖动牵引，右下角独立点火；横屏体验更佳。</p>
         <a class="button primary" href="/games/qianxing/" data-zh="玩一局牵星 →" data-en="Play Qianxing →">玩一局牵星 →</a>
       </section>
